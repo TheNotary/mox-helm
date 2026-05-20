@@ -1,5 +1,8 @@
 # Mox Helm Chart
 
+[![CI](https://github.com/thenotary/mox-helm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/thenotary/mox-helm/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/thenotary/mox-helm?label=release)](https://github.com/thenotary/mox-helm/releases/latest)
+
 A Helm chart for deploying the [mox](https://github.com/mjl-/mox) mail server to Kubernetes, with first-class support for Azure AKS.
 
 ## Prerequisites
@@ -244,5 +247,5 @@ When enabled, the teardown hook will: disassociate the DS record from the regist
 ## Cutting a Release
 
 ```sh
-./release.sh 0.2.0
+./scripts/release.sh 0.2.0
 ```
