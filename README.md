@@ -246,6 +246,8 @@ When enabled, the teardown hook will: disassociate the DS record from the regist
 
 ## Cutting a Release
 
+Just push a semver tag.
+
 ```sh
-./scripts/release.sh 0.2.0
+gtag v0.2.0
 ```

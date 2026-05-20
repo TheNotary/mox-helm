@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+#
+# Deprecated, was handy when fleshing out the chart, but use git tags and CI for releases
+# and pull this pattern into a template when you have time :D
+#
+
 set -euo pipefail
 
 VERSION=$1
