@@ -1,0 +1,63 @@
+Mox mail server has been deployed.
+{{- if and .Values.outboundPublicIpManagement.enabled .Values.service.type }}
+
+=== WARNING: service section IGNORED ===
+
+The service section is configured but will be ignored because outboundPublicIpManagement
+is enabled. The chart hardcodes type: LoadBalancer and externalTrafficPolicy: Local
+when managed IPs are active. You can safely remove the service section from
+your values.
+{{- end }}
+
+Get the application URL by running:
+{{- if or .Values.outboundPublicIpManagement.enabled (eq .Values.service.type "LoadBalancer") }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+  You can watch the status with:
+    kubectl get svc --namespace {{ .Release.Namespace }} -w {{ include "mox.fullname" . }}
+{{- end }}
+
+Hostname: {{ .Values.hostname }}
+
+=== IMPORTANT: DNS RECORDS ===
+
+You MUST configure the following DNS records for mail to work correctly.
+{{- range $domain, $cfg := .Values.domains }}
+
+--- {{ $domain }} ---
+  MX:      {{ $domain }}. -> {{ $.Values.hostname }}. (priority 10)
+  SPF:     {{ $domain }}. TXT "v=spf1 ip4:{{ $.Values.staticPublicIPs.ipv4 }} ~all"
+  DMARC:   _dmarc.{{ $domain }}. TXT "v=DMARC1; p=reject; rua=mailto:{{ default "dmarcreports" (($cfg.dmarc).localpart) }}@{{ $domain }}"
+  MTA-STS: _mta-sts.{{ $domain }}. TXT "v=STSv1; id=<unique-policy-id>"
+  TLSRPT:  _smtp._tls.{{ $domain }}. TXT "v=TLSRPTv1; rua=mailto:{{ default "tlsreports" (($cfg.tlsrpt).localpart) }}@{{ $domain }}"
+{{- end }}
+
+=== REVERSE DNS (PTR) ===
+{{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+{{- $ipProvider := index .Values.providers .Values.outboundPublicIpManagement.provider }}
+{{- $ipConfig := $ipProvider.config | default dict }}
+
+{{ $ipProvider.platform }} provider "{{ .Values.outboundPublicIpManagement.provider }}" is managing your Public IP with reverse DNS:
+  ReverseFqdn: {{ $ipConfig.reverseFqdn | default .Values.hostname }}
+{{- else }}
+
+You must configure reverse DNS (PTR) on your public IP for mail deliverability.
+For Azure, run:
+  az network public-ip update \
+    --resource-group <RESOURCE_GROUP> \
+    --name <PUBLIC_IP_NAME> \
+    --reverse-fqdn {{ .Values.hostname }}. \
+    --dns-name <DOMAIN_NAME_LABEL>
+
+NOTE: Forward DNS (A record) for {{ .Values.hostname }} must resolve to the
+public IP BEFORE Azure will accept the reverse FQDN setting.
+Azure only supports IPv4 reverse DNS.
+{{- end }}
+
+{{- if not .Values.transport.enabled }}
+
+=== WARNING: OUTBOUND SMTP ===
+
+Smarthost relay transport is NOT enabled. If your Azure subscription is not
+Enterprise Agreement or MCA-E, outbound port 25 is blocked and mail delivery
+will fail. Enable transport in values.yaml to use an authenticated SMTP relay.
+{{- end }}

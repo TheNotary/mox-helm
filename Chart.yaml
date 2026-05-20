@@ -1,0 +1,17 @@
+apiVersion: v2
+name: mox
+description: A Helm chart for deploying the mox mail server to Kubernetes
+type: application
+version: 0.0.22
+appVersion: "v0.0.15"
+keywords:
+  - mail
+  - email
+  - smtp
+  - imap
+  - mox
+home: https://github.com/mjl-/mox
+sources:
+  - https://github.com/mjl-/mox
+maintainers:
+  - name: thenotary

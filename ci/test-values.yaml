@@ -1,0 +1,39 @@
+hostname: mail.example.com
+publicIPs:
+  ipv4: "203.0.113.5"
+logLevel: info
+admin:
+  passwordHash: "$2b$10$examplehashhere"
+domains:
+  example.com:
+    description: "Primary domain"
+    dkim:
+      selectors:
+        sel1:
+          algorithm: ed25519
+          privateKey: "dGVzdC1wcml2YXRlLWtleQ=="
+      sign:
+        - sel1
+    dmarc:
+      localpart: dmarcreports
+      account: postmaster
+      mailbox: DMARC
+    mtasts:
+      mode: enforce
+      maxAge: 86400
+    tlsrpt:
+      localpart: tlsreports
+      account: postmaster
+      mailbox: TLSRPT
+accounts:
+  postmaster:
+    domain: example.com
+    fullName: "Postmaster"
+    destinations:
+      postmaster@example.com:
+        mailbox: Inbox
+certManager:
+  enabled: true
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer

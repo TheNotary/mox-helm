@@ -1,0 +1,166 @@
+{{- if include "mox.anyDomainNeedsDkimGeneration" . }}
+{{- $domains := .Values.domains }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-dkim-keygen
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  generate-dkim.sh: |
+    #!/bin/sh
+    set -e
+
+    NAMESPACE="{{ .Release.Namespace }}"
+    SECRET_NAME="{{ include "mox.dkimGeneratedSecretName" . }}"
+    API_SERVER="https://kubernetes.default.svc"
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+    kube_api() {
+      local METHOD="$1"; shift
+      curl -s -o /tmp/kube_response -w "%{http_code}" \
+        --cacert "$CACERT" \
+        -H "Authorization: Bearer $TOKEN" \
+        -X "$METHOD" \
+        "$@"
+    }
+
+    # Attempt to GET the existing secret
+    echo "Checking for existing secret $SECRET_NAME..."
+    HTTP_CODE=$(kube_api GET "$API_SERVER/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")
+    if [ "$HTTP_CODE" = "200" ]; then
+      echo "Secret $SECRET_NAME exists, checking for missing keys..."
+      EXISTING_KEYS=$(cat /tmp/kube_response)
+    else
+      echo "Secret $SECRET_NAME does not exist, will create..."
+      EXISTING_KEYS=""
+    fi
+
+    # Accumulate JSON data entries into a file (one "key": "value" per line)
+    ENTRIES_FILE=/tmp/data_entries
+    : > "$ENTRIES_FILE"
+
+    add_entry() {
+      local KEY="$1"
+      local VALUE="$2"
+      if [ -s "$ENTRIES_FILE" ]; then
+        printf ',\n' >> "$ENTRIES_FILE"
+      fi
+      printf '"%s": "%s"' "$KEY" "$VALUE" >> "$ENTRIES_FILE"
+    }
+
+    generate_key() {
+      local SELECTOR="$1"
+      local DOMAIN="$2"
+      local ALGORITHM="$3"
+      local PRIVKEY_NAME="${SELECTOR}-${DOMAIN}.privkey"
+      local PUBKEY_NAME="${SELECTOR}-${DOMAIN}.pubkey"
+      local ALGO_NAME="${SELECTOR}-${DOMAIN}.algorithm"
+
+      # Check if key already exists in secret
+      if [ -n "$EXISTING_KEYS" ]; then
+        if echo "$EXISTING_KEYS" | grep -q "\"${PRIVKEY_NAME}\""; then
+          echo "  Key $PRIVKEY_NAME already exists, skipping."
+          return
+        fi
+      fi
+
+      echo "  Generating $ALGORITHM key: $PRIVKEY_NAME"
+
+      case "$ALGORITHM" in
+        ed25519)
+          openssl genpkey -algorithm ED25519 -out /tmp/privkey.pem 2>/dev/null
+          PUBKEY_B64=$(openssl pkey -in /tmp/privkey.pem -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n')
+          ;;
+        rsa)
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/privkey.pem 2>/dev/null
+          PUBKEY_B64=$(openssl pkey -in /tmp/privkey.pem -pubout -outform DER 2>/dev/null | base64 | tr -d '\n')
+          ;;
+        *)
+          echo "  ERROR: Unknown algorithm: $ALGORITHM"; return 1
+          ;;
+      esac
+
+      PRIVKEY_B64=$(base64 < /tmp/privkey.pem | tr -d '\n')
+      ALGO_B64=$(printf '%s' "$ALGORITHM" | base64 | tr -d '\n')
+      PUBKEY_SECRET_B64=$(printf '%s' "$PUBKEY_B64" | base64 | tr -d '\n')
+
+      add_entry "$PRIVKEY_NAME" "$PRIVKEY_B64"
+      add_entry "$PUBKEY_NAME" "$PUBKEY_SECRET_B64"
+      add_entry "$ALGO_NAME" "$ALGO_B64"
+
+      rm -f /tmp/privkey.pem
+    }
+
+    # --- Generate keys for each domain that needs auto-generation ---
+    {{- range $cfg := .Values.domains }}
+    {{- $needsGen := include "mox.domainNeedsDkimGeneration" (dict "domain" $cfg "global" $) }}
+    {{- if $needsGen }}
+    echo "Domain: {{ $cfg.name }}"
+    {{- $effSel := include "mox.dkimSelectorsForDomain" (dict "domain" $cfg "global" $) | fromYaml }}
+    {{- range $sel, $selCfg := $effSel }}
+    generate_key "{{ $sel }}" "{{ $cfg.name }}" "{{ $selCfg.algorithm }}"
+    {{- end }}
+    {{- end }}
+    {{- end }}
+
+    if [ ! -s "$ENTRIES_FILE" ]; then
+      echo "All keys already exist. Nothing to do."
+      exit 0
+    fi
+
+    DATA_JSON=$(printf '{%s}' "$(cat "$ENTRIES_FILE")")
+
+    if [ -z "$EXISTING_KEYS" ]; then
+      echo "Creating secret $SECRET_NAME..."
+      BODY=$(printf '{
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": "%s",
+        "namespace": "%s",
+        "labels": {
+          "helm.sh/chart": "{{ include "mox.chart" . }}",
+          "app.kubernetes.io/name": "{{ include "mox.name" . }}",
+          "app.kubernetes.io/instance": "{{ .Release.Name }}",
+          "app.kubernetes.io/managed-by": "{{ .Release.Service }}"
+        },
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "type": "Opaque",
+      "data": %s
+    }' "$SECRET_NAME" "$NAMESPACE" "$DATA_JSON")
+      HTTP_CODE=$(kube_api POST \
+        -H "Content-Type: application/json" \
+        -d "$BODY" \
+        "$API_SERVER/api/v1/namespaces/$NAMESPACE/secrets")
+      if [ "$HTTP_CODE" != "201" ]; then
+        echo "ERROR: Failed to create secret (HTTP $HTTP_CODE)"
+        cat /tmp/kube_response
+        exit 1
+      fi
+      echo "Secret created successfully."
+    else
+      echo "Patching secret $SECRET_NAME..."
+      PATCH_BODY=$(printf '{"data": %s}' "$DATA_JSON")
+      HTTP_CODE=$(kube_api PATCH \
+        -H "Content-Type: application/merge-patch+json" \
+        -d "$PATCH_BODY" \
+        "$API_SERVER/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")
+      if [ "$HTTP_CODE" != "200" ]; then
+        echo "ERROR: Failed to patch secret (HTTP $HTTP_CODE)"
+        cat /tmp/kube_response
+        exit 1
+      fi
+      echo "Secret patched successfully."
+    fi
+
+    echo "DKIM key generation complete."
+{{- end }}

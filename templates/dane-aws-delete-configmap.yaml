@@ -1,0 +1,65 @@
+{{- if include "mox.hostnameDomainHasDnssec" . }}
+{{- include "mox.validateSameDnssecProvider" . }}
+{{- $dnssecProviderName := include "mox.dnssecProvider" . }}
+{{- include "mox.requireProvider" (dict "feature" "dnssec" "name" $dnssecProviderName "expectedPlatform" "aws" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" $dnssecProviderName "providers" .Values.providers) | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-dane-aws-delete
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "2"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  teardown-dane.sh: |
+    #!/bin/sh
+    set -e
+
+    ZONE_ID="{{ required "dnssec provider config.hostedZoneId is required" $cfg.hostedZoneId }}"
+    HOSTNAME="{{ .Values.hostname }}"
+
+    echo "=== DANE TLSA Record Teardown for ${HOSTNAME} ==="
+
+    # TLSA records are created at _25._tcp and _465._tcp by setup-dane.sh.
+    # The hash values change with certificate rotation, so we must list-then-delete.
+    CHANGES=""
+    SEP=""
+
+    for PORT in 25 465; do
+      NAME="_${PORT}._tcp.${HOSTNAME}."
+
+      RRS=$(aws route53 list-resource-record-sets \
+        --hosted-zone-id "$ZONE_ID" \
+        --start-record-name "$NAME" \
+        --start-record-type "TLSA" \
+        --max-items 1 \
+        --query "ResourceRecordSets[?Name=='${NAME}' && Type=='TLSA'] | [0]" \
+        --output json 2>/dev/null || echo "null")
+
+      if [ "$RRS" = "null" ] || [ -z "$RRS" ]; then
+        echo "No TLSA record found at ${NAME}. Skipping."
+        continue
+      fi
+
+      echo "Deleting: ${NAME} TLSA"
+      CHANGES="${CHANGES}${SEP}{\"Action\":\"DELETE\",\"ResourceRecordSet\":${RRS}}"
+      SEP=","
+    done
+
+    if [ -z "$CHANGES" ]; then
+      echo "No TLSA records found. Nothing to delete."
+      exit 0
+    fi
+
+    echo "{\"Changes\":[${CHANGES}]}" > /tmp/dane-delete.json
+
+    aws route53 change-resource-record-sets \
+      --hosted-zone-id "$ZONE_ID" \
+      --change-batch file:///tmp/dane-delete.json
+
+    echo "DANE TLSA records deleted successfully."
+    echo "=== DANE teardown complete ==="
+{{- end }}

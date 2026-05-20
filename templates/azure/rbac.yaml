@@ -1,0 +1,37 @@
+{{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+{{- $platform := include "mox.providerPlatform" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) }}
+{{- if eq $platform "azureAso" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mox.fullname" . }}-aso-reader
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mox.fullname" . }}-aso-reader
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["network.azure.com"]
+    resources: ["publicipaddresses"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mox.fullname" . }}-aso-reader
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mox.fullname" . }}-aso-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mox.fullname" . }}-aso-reader
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,117 @@
+{{- if include "mox.anyNeedsDnsHook" . }}
+{{- if include "mox.anyDomainHasDns" . }}
+{{- include "mox.validateSameDnsProvider" . }}
+{{- end }}
+{{- include "mox.validateTlsrptProviders" . }}
+{{- $dnsProviderName := include "mox.dnsHookProvider" . }}
+{{- include "mox.requireProvider" (dict "feature" "dns" "name" $dnsProviderName "expectedPlatform" "aws" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" $dnsProviderName "providers" .Values.providers) | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-dns-aws-delete
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  teardown-dns.sh: |
+    #!/bin/sh
+    set -e
+
+    ZONE_ID="{{ required "dns provider config.hostedZoneId is required" $cfg.hostedZoneId }}"
+    HOSTNAME="{{ .Values.hostname }}"
+
+    echo "=== Route53 DNS Teardown for zone ${ZONE_ID} ==="
+
+    # Build a list of record names we manage.
+    # These match exactly what setup-dns.sh creates.
+    cat > /tmp/managed_names.txt << 'NAMES'
+    {{ .Values.hostname }}.
+    {{- if .Values.hostTlsrpt.enabled }}
+    _smtp._tls.{{ .Values.hostname }}.
+    {{- end }}
+    {{- range $cfg := .Values.domains }}
+    {{- if and $cfg.dns $cfg.dns.enabled }}
+    {{ $cfg.name }}.
+    {{- if $cfg.dkim }}
+    {{- range $sel, $selCfg := $cfg.dkim.selectors }}
+    {{- if $selCfg.publicKey }}
+    {{ $sel }}._domainkey.{{ $cfg.name }}.
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- if $cfg.dmarc }}
+    _dmarc.{{ $cfg.name }}.
+    {{- end }}
+    {{- if $cfg.mtasts }}
+    _mta-sts.{{ $cfg.name }}.
+    mta-sts.{{ $cfg.name }}.
+    {{- end }}
+    {{- if and $cfg.tlsrpt $cfg.tlsrpt.enabled }}
+    _smtp._tls.{{ $cfg.name }}.
+    {{- end }}
+    autoconfig.{{ $cfg.name }}.
+    _submissions._tcp.{{ $cfg.name }}.
+    _submission._tcp.{{ $cfg.name }}.
+    _imaps._tcp.{{ $cfg.name }}.
+    _imap._tcp.{{ $cfg.name }}.
+    _pop3._tcp.{{ $cfg.name }}.
+    _pop3s._tcp.{{ $cfg.name }}.
+    _autodiscover._tcp.{{ $cfg.name }}.
+    {{- end }}{{/* if $cfg.dns.enabled */}}
+    {{- end }}{{/* range .Values.domains */}}
+    NAMES
+
+    # Trim whitespace from each line
+    sed -i 's/^[[:space:]]*//' /tmp/managed_names.txt
+    # Remove empty lines
+    sed -i '/^$/d' /tmp/managed_names.txt
+
+    echo "Managed record names:"
+    cat /tmp/managed_names.txt | sed 's/^/  /'
+
+    # Install jq for JSON processing (not included in aws-cli image)
+    yum install -y -q jq
+
+    # Fetch ALL record sets from the zone in a single API call
+    echo "Listing all record sets in zone ${ZONE_ID}..."
+    aws route53 list-resource-record-sets \
+      --hosted-zone-id "$ZONE_ID" \
+      --output json > /tmp/all-records.json
+
+    # Convert managed names list to a JSON array for jq filtering
+    jq -R -s 'split("\n") | map(select(length > 0))' \
+      /tmp/managed_names.txt > /tmp/names.json
+
+    # Build a single DELETE changeset: filter to managed names, exclude NS/SOA
+    jq --slurpfile names /tmp/names.json '
+      [.ResourceRecordSets[]
+        | select(.Name as $n | ($names[0] | index($n)) != null)
+        | select(.Type != "NS" and .Type != "SOA")
+        | {"Action": "DELETE", "ResourceRecordSet": .}]
+      | if length == 0 then null else {"Changes": .} end
+    ' /tmp/all-records.json > /tmp/delete-changes.json
+
+    CHANGE_BATCH=$(cat /tmp/delete-changes.json)
+
+    if [ "$CHANGE_BATCH" = "null" ] || [ -z "$CHANGE_BATCH" ]; then
+      echo "No managed records found in zone. Nothing to delete."
+      exit 0
+    fi
+
+    CHANGE_COUNT=$(jq '.Changes | length' /tmp/delete-changes.json)
+    echo "Records to delete:"
+    jq -r '.Changes[] | "  \(.ResourceRecordSet.Name) \(.ResourceRecordSet.Type)"' \
+      /tmp/delete-changes.json
+    echo "Submitting ${CHANGE_COUNT} DELETE operations in a single batch..."
+
+    aws route53 change-resource-record-sets \
+      --hosted-zone-id "$ZONE_ID" \
+      --change-batch file:///tmp/delete-changes.json
+
+    echo "Deleted ${CHANGE_COUNT} record(s)."
+    echo "=== DNS teardown complete ==="
+{{- end }}

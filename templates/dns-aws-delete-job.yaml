@@ -1,0 +1,57 @@
+{{- if include "mox.anyNeedsDnsHook" . }}
+{{- if include "mox.anyDomainHasDns" . }}
+{{- include "mox.validateSameDnsProvider" . }}
+{{- end }}
+{{- include "mox.validateTlsrptProviders" . }}
+{{- $dnsProviderName := include "mox.dnsHookProvider" . }}
+{{- include "mox.requireProvider" (dict "feature" "dns" "name" $dnsProviderName "expectedPlatform" "aws" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" $dnsProviderName "providers" .Values.providers) | fromYaml }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mox.fullname" . }}-dns-aws-delete
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "mox.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dns-aws-delete
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: teardown-dns
+          image: {{ $cfg.image | default "amazon/aws-cli:2.22.35" }}
+          command: ["sh", "/scripts/teardown-dns.sh"]
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mox.fullname" . }}-dns-aws-credentials
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mox.fullname" . }}-dns-aws-credentials
+                  key: aws-secret-access-key
+            - name: AWS_DEFAULT_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mox.fullname" . }}-dns-aws-credentials
+                  key: aws-region
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "mox.fullname" . }}-dns-aws-delete
+            defaultMode: 0755
+{{- end }}

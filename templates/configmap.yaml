@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-config
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+data:
+  mox.conf: |
+    DataDir: /mox/data
+    Hostname: {{ .Values.hostname }}
+    LogLevel: {{ .Values.logLevel }}
+    {{- if .Values.admin.passwordHash }}
+    AdminPasswordFile: adminpasswd
+    {{- end }}
+    Listeners:
+    	public:
+    		IPs:
+    			- 0.0.0.0
+    {{- if or .Values.staticPublicIPs.ipv4 .Values.staticPublicIPs.ipv6 (and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider (not .Values.staticPublicIPs.ipv4)) }}
+    		NATIPs:
+    {{- if .Values.staticPublicIPs.ipv4 }}
+    			- {{ .Values.staticPublicIPs.ipv4 }}
+    {{- else if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+    			- __ASO_PUBLIC_IP__
+    {{- end }}
+    {{- if .Values.staticPublicIPs.ipv6 }}
+    			- {{ .Values.staticPublicIPs.ipv6 }}
+    {{- end }}
+    {{- end }}
+    {{- if and .Values.tlsManagement.enabled .Values.tlsManagement.provider }}
+    		TLS:
+    			KeyCerts:
+    				-
+    					CertFile: /mox/tls/tls.crt
+    					KeyFile: /mox/tls/tls.key
+    {{- if include "mox.anyDomainHasDnssec" . }}
+    			HostPrivateKeyFiles:
+    				- /mox/tls/tls.key
+    {{- end }}
+    {{- end }}
+    {{- if .Values.listeners.smtp.enabled }}
+    		SMTP:
+    			Enabled: true
+    			Port: {{ .Values.listeners.smtp.port }}
+    {{- end }}
+    {{- if .Values.listeners.submissions.enabled }}
+    		Submissions:
+    			Enabled: true
+    			Port: {{ .Values.listeners.submissions.port }}
+    {{- end }}
+    {{- if .Values.listeners.submission.enabled }}
+    		Submission:
+    			Enabled: true
+    			Port: {{ .Values.listeners.submission.port }}
+    {{- end }}
+    {{- if .Values.listeners.imaps.enabled }}
+    		IMAPS:
+    			Enabled: true
+    			Port: {{ .Values.listeners.imaps.port }}
+    {{- end }}
+    {{- if .Values.listeners.imap.enabled }}
+    		IMAP:
+    			Enabled: true
+    			Port: {{ .Values.listeners.imap.port }}
+    {{- end }}
+    {{- if .Values.listeners.webmail.enabled }}
+    		WebmailHTTPS:
+    			Enabled: true
+    {{- end }}
+    {{- if .Values.listeners.webapi.enabled }}
+    		WebAPIHTTPS:
+    			Enabled: true
+    {{- end }}
+    		AutoconfigHTTPS:
+    			Enabled: true
+    		MTASTSHTTPS:
+    			Enabled: true
+    {{- if .Values.listeners.admin.enabled }}
+    		AdminHTTPS:
+    			Enabled: true
+    {{- end }}
+    	internal:
+    		IPs:
+    			- 127.0.0.1
+    {{- if .Values.listeners.metrics.enabled }}
+    		MetricsHTTP:
+    			Enabled: true
+    			Port: {{ .Values.listeners.metrics.port }}
+    {{- end }}
+    Postmaster:
+    	Account: {{ if .Values.accounts }}{{ (first (keys .Values.accounts)) | default "postmaster" }}{{ else }}postmaster{{ end }}
+    	Mailbox: Inbox
+    {{- if .Values.hostTlsrpt.enabled }}
+    HostTLSRPT:
+    	Account: {{ .Values.hostTlsrpt.account }}
+    	Localpart: {{ .Values.hostTlsrpt.localpart }}
+    	Mailbox: {{ .Values.hostTlsrpt.mailbox }}
+    {{- end }}
+    {{- if .Values.transport.enabled }}
+    Transports:
+    	smarthost:
+    		{{ .Values.transport.type | title }}:
+    			Host: {{ .Values.transport.host }}
+    			Port: {{ .Values.transport.port }}
+    			Auth:
+    				Username: {{ .Values.transport.auth.username }}
+    				Password: {{ .Values.transport.auth.password }}
+    				Mechanisms:
+    {{- range .Values.transport.auth.mechanisms }}
+    					- {{ . }}
+    {{- end }}
+    Routes:
+    	-
+    		Transport: smarthost
+    {{- else if .Values.selfDelivery.enabled }}
+    Transports:
+    	selfdelivery:
+    		SMTP:
+    			Host: localhost
+    			Port: 25
+    			NoSTARTTLS: true
+    {{- end }}

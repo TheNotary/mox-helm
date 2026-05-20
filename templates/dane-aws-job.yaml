@@ -1,0 +1,61 @@
+{{- if include "mox.hostnameDomainHasDnssec" . }}
+{{- include "mox.validateSameDnssecProvider" . }}
+{{- $dnssecProviderName := include "mox.dnssecProvider" . }}
+{{- include "mox.requireProvider" (dict "feature" "dnssec" "name" $dnssecProviderName "expectedPlatform" "aws" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" $dnssecProviderName "providers" .Values.providers) | fromYaml }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mox.fullname" . }}-dane-aws
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "7"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "mox.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dane-aws
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: setup-dane
+          image: {{ $cfg.image | default "amazon/aws-cli:2.22.35" }}
+          command: ["sh", "-c", "yum install -y -q openssl && sh /scripts/setup-dane.sh"]
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mox.fullname" . }}-dns-aws-credentials
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mox.fullname" . }}-dns-aws-credentials
+                  key: aws-secret-access-key
+            - name: AWS_DEFAULT_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mox.fullname" . }}-dns-aws-credentials
+                  key: aws-region
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "mox.fullname" . }}-dane-aws
+            defaultMode: 0755
+        - name: tls
+          secret:
+            secretName: {{ include "mox.tlsSecretName" . }}
+            optional: true
+{{- end }}

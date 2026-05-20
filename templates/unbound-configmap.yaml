@@ -1,0 +1,75 @@
+{{- if .Values.dnssecResolverSidecar.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-unbound
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+data:
+  unbound.conf: |
+    server:
+        # Disable chroot so absolute paths work normally
+        chroot: ""
+        # Run as the _unbound user created by the image
+        username: "_unbound"
+        # Stay in foreground (required for container lifecycle)
+        do-daemonize: no
+
+        interface: 127.0.0.1
+        port: 53
+        do-ip4: yes
+        do-ip6: no
+        do-udp: yes
+        do-tcp: yes
+
+        access-control: 127.0.0.0/8 allow
+        access-control: 0.0.0.0/0 refuse
+
+        # DNSSEC validation — path matches what unbound.sh creates
+        auto-trust-anchor-file: "/opt/unbound/etc/unbound/var/root.key"
+        val-log-level: 2
+
+        # Extended DNS Errors (RFC 8914) — required by mox for DNSSEC diagnostics
+        ede: yes
+        ede-serve-expired: yes
+
+        # TLS certificate bundle for DNS-over-TLS upstream connections
+        tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt
+
+        # Performance tuning for sidecar use
+        num-threads: 1
+        msg-cache-size: 4m
+        rrset-cache-size: 8m
+        key-cache-size: 4m
+        neg-cache-size: 1m
+
+        # Hardening
+        hide-identity: yes
+        hide-version: yes
+        harden-glue: yes
+        harden-dnssec-stripped: yes
+        harden-below-nxdomain: yes
+        use-caps-for-id: yes
+        do-not-query-localhost: no
+
+        # Logging
+        verbosity: 1
+        log-queries: no
+        log-replies: no
+        logfile: ""
+
+        # Resolve localhost to loopback (used by selfDelivery transport)
+        local-zone: "localhost." static
+        local-data: "localhost. A 127.0.0.1"
+
+    forward-zone:
+        name: "."
+        forward-addr: 1.1.1.1@853#cloudflare-dns.com
+        forward-addr: 1.0.0.1@853#cloudflare-dns.com
+        forward-addr: 8.8.8.8@853#dns.google
+        forward-addr: 8.8.4.4@853#dns.google
+        forward-tls-upstream: yes
+
+    remote-control:
+        control-enable: no
+{{- end }}

@@ -1,0 +1,84 @@
+{{- if not .Values.outboundPublicIpManagement.enabled }}
+  {{- if not .Values.service.type }}
+    {{- fail "Either enable outboundPublicIpManagement or configure service to define how traffic is routed." }}
+  {{- end }}
+  {{- if not .Values.staticPublicIPs.ipv4 }}
+    {{- fail "staticPublicIPs.ipv4 is required when outboundPublicIpManagement is not enabled. Set the public IPv4 address of your LoadBalancer." }}
+  {{- end }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mox.fullname" . }}
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    {{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+    {{- $ipPlatform := include "mox.providerPlatform" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) }}
+    {{- if eq $ipPlatform "azureAso" }}
+    {{- $ipCfg := include "mox.providerConfig" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) | fromYaml }}
+    service.beta.kubernetes.io/azure-pip-name: {{ required "ipProvider config.publicIp.name is required" $ipCfg.publicIp.name | quote }}
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: {{ required "ipProvider config.resourceGroup is required" $ipCfg.resourceGroup | quote }}
+    {{- end }}
+    {{- else }}
+    {{- if .Values.staticPublicIPs.ipv4 }}
+    service.beta.kubernetes.io/azure-load-balancer-ipv4: {{ .Values.staticPublicIPs.ipv4 | quote }}
+    {{- end }}
+    {{- with .Values.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- end }}
+spec:
+  {{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  {{- else }}
+  type: {{ .Values.service.type }}
+  {{- if .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  {{- if .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.service.loadBalancerIP }}
+  {{- end }}
+  {{- end }}
+  selector:
+    {{- include "mox.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- if .Values.listeners.smtp.enabled }}
+    - name: smtp
+      port: {{ .Values.listeners.smtp.port }}
+      targetPort: smtp
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.listeners.submissions.enabled }}
+    - name: submissions
+      port: {{ .Values.listeners.submissions.port }}
+      targetPort: submissions
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.listeners.submission.enabled }}
+    - name: submission
+      port: {{ .Values.listeners.submission.port }}
+      targetPort: submission
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.listeners.imaps.enabled }}
+    - name: imaps
+      port: {{ .Values.listeners.imaps.port }}
+      targetPort: imaps
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.listeners.imap.enabled }}
+    - name: imap
+      port: {{ .Values.listeners.imap.port }}
+      targetPort: imap
+      protocol: TCP
+    {{- end }}
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP

@@ -1,0 +1,51 @@
+{{- if include "mox.anyDomainNeedsDkimGeneration" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mox.fullname" . }}-dkim-keygen
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mox.fullname" . }}-dkim-keygen
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch"]
+  {{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+  - apiGroups: ["network.azure.com"]
+    resources: ["publicipaddresses"]
+    verbs: ["get", "list", "watch", "patch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mox.fullname" . }}-dkim-keygen
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mox.fullname" . }}-dkim-keygen
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mox.fullname" . }}-dkim-keygen
+    namespace: {{ .Release.Namespace }}
+{{- end }}

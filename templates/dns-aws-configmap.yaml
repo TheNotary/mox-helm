@@ -1,0 +1,340 @@
+{{- if include "mox.anyNeedsDnsHook" . }}
+{{- if include "mox.anyDomainHasDns" . }}
+{{- include "mox.validateSameDnsProvider" . }}
+{{- end }}
+{{- include "mox.validateTlsrptProviders" . }}
+{{- $dnsProviderName := include "mox.dnsHookProvider" . }}
+{{- include "mox.requireProvider" (dict "feature" "dns" "name" $dnsProviderName "expectedPlatform" "aws" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" $dnsProviderName "providers" .Values.providers) | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-dns-aws
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  setup-dns.sh: |
+    #!/bin/sh
+    set -e
+
+    ZONE_ID="{{ required "dns provider config.hostedZoneId is required" $cfg.hostedZoneId }}"
+    HOSTNAME="{{ .Values.hostname }}"
+
+    {{- if .Values.staticPublicIPs.ipv4 }}
+    MOX_PUBLIC_IP="{{ .Values.staticPublicIPs.ipv4 }}"
+    {{- else if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+    {{- $ipCfg := include "mox.providerConfig" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) | fromYaml }}
+    # Discover IP from ASO PublicIPAddress via Kubernetes API
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    NS="{{ .Release.Namespace }}"
+    PIP="{{ $ipCfg.publicIp.name | default (printf "%s-pip" (include "mox.fullname" .)) }}"
+    API="https://kubernetes.default.svc/apis/network.azure.com/v1api20201101/namespaces/${NS}/publicipaddresses/${PIP}"
+    MOX_PUBLIC_IP=$(curl -sf --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$API" \
+      | sed -n 's/.*"ipAddress": *"\([^"]*\)".*/\1/p')
+    echo "Discovered IP from ASO: $MOX_PUBLIC_IP"
+    {{- end }}
+
+    if [ -z "$MOX_PUBLIC_IP" ]; then
+      echo "ERROR: No public IP available. Set staticPublicIPs.ipv4 or enable outboundPublicIpManagement with a provider."
+      exit 1
+    fi
+
+    echo "Creating DNS records in Route53 zone ${ZONE_ID} for ${HOSTNAME} (IP: ${MOX_PUBLIC_IP})"
+
+    cat > /tmp/changes.json << CHANGESET
+    {
+      "Changes": [
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "${HOSTNAME}.",
+            "Type": "A",
+            "TTL": 300,
+            "ResourceRecords": [{"Value": "${MOX_PUBLIC_IP}"}]
+          }
+        }
+    {{- if .Values.hostTlsrpt.enabled }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_smtp._tls.${HOSTNAME}.",
+            "Type": "TXT",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "\"v=TLSRPTv1; rua=mailto:{{ .Values.hostTlsrpt.localpart }}@{{ .Values.hostname }}\""}]
+          }
+        }
+    {{- end }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "${HOSTNAME}.",
+            "Type": "TXT",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "\"v=spf1 ip4:${MOX_PUBLIC_IP}{{ range .Values.outboundIPs }} ip4:{{ . }}{{ end }}{{ if .Values.selfDelivery.enabled }} ip4:127.0.0.1{{ end }} ~all\""}]
+          }
+        }
+    {{- range $cfg := .Values.domains }}
+    {{- if and $cfg.dns $cfg.dns.enabled }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "{{ $cfg.name }}.",
+            "Type": "MX",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "10 {{ $.Values.hostname }}."}]
+          }
+        },
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "{{ $cfg.name }}.",
+            "Type": "TXT",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "\"v=spf1 ip4:${MOX_PUBLIC_IP}{{ range $.Values.outboundIPs }} ip4:{{ . }}{{ end }}{{ if $.Values.selfDelivery.enabled }} ip4:127.0.0.1{{ end }} ~all\""}]
+          }
+        }
+    {{- if $cfg.dkim }}
+    {{- range $sel, $selCfg := $cfg.dkim.selectors }}
+    {{- if $selCfg.publicKey }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "{{ $sel }}._domainkey.{{ $cfg.name }}.",
+            "Type": "TXT",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "{{ include "mox.txtChunks" (printf "v=DKIM1; k=%s; p=%s" ($selCfg.algorithm | default "ed25519") $selCfg.publicKey) }}"}]
+          }
+        }
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- $needsGen := include "mox.domainNeedsDkimGeneration" (dict "domain" $cfg "global" $) -}}
+    {{- if $needsGen }}
+    {{- $effSel := include "mox.dkimSelectorsForDomain" (dict "domain" $cfg "global" $) | fromYaml -}}
+    {{- range $sel, $selCfg := $effSel }}
+    {{- /* DKIM records for auto-generated keys are created in the second changeset below */ -}}
+    {{- end }}
+    {{- end }}
+    {{- if $cfg.dmarc }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_dmarc.{{ $cfg.name }}.",
+            "Type": "TXT",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "\"v=DMARC1; p={{ $cfg.dmarc.policy | default "none" }}; rua=mailto:{{ $cfg.dmarc.localpart }}@{{ $cfg.name }}\""}]
+          }
+        }
+    {{- end }}
+    {{- if $cfg.mtasts }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_mta-sts.{{ $cfg.name }}.",
+            "Type": "TXT",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "\"v=STSv1; id={{ printf "%s-%s-%s-%s" $cfg.name $cfg.mtasts.mode $cfg.mtasts.maxAge $.Values.hostname | sha256sum | trunc 8 }}\""}]
+          }
+        },
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "mta-sts.{{ $cfg.name }}.",
+            "Type": "CNAME",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "{{ $.Values.hostname }}."}]
+          }
+        }
+    {{- end }}
+    {{- if and $cfg.tlsrpt $cfg.tlsrpt.enabled (or (not $.Values.hostTlsrpt.enabled) (ne $cfg.name $.Values.hostname)) }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_smtp._tls.{{ $cfg.name }}.",
+            "Type": "TXT",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "\"v=TLSRPTv1; rua=mailto:{{ $cfg.tlsrpt.localpart }}@{{ $cfg.name }}\""}]
+          }
+        }
+    {{- end }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "autoconfig.{{ $cfg.name }}.",
+            "Type": "CNAME",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "{{ $.Values.hostname }}."}]
+          }
+        }
+    {{- if $.Values.listeners.submissions.enabled }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_submissions._tcp.{{ $cfg.name }}.",
+            "Type": "SRV",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "0 1 {{ $.Values.listeners.submissions.port }} {{ $.Values.hostname }}."}]
+          }
+        }
+    {{- end }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_submission._tcp.{{ $cfg.name }}.",
+            "Type": "SRV",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "0 0 0 ."}]
+          }
+        }
+    {{- if $.Values.listeners.imaps.enabled }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_imaps._tcp.{{ $cfg.name }}.",
+            "Type": "SRV",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "0 1 {{ $.Values.listeners.imaps.port }} {{ $.Values.hostname }}."}]
+          }
+        }
+    {{- end }},
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_imap._tcp.{{ $cfg.name }}.",
+            "Type": "SRV",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "0 0 0 ."}]
+          }
+        },
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_pop3._tcp.{{ $cfg.name }}.",
+            "Type": "SRV",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "0 0 0 ."}]
+          }
+        },
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_pop3s._tcp.{{ $cfg.name }}.",
+            "Type": "SRV",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "0 0 0 ."}]
+          }
+        },
+        {
+          "Action": "UPSERT",
+          "ResourceRecordSet": {
+            "Name": "_autodiscover._tcp.{{ $cfg.name }}.",
+            "Type": "SRV",
+            "TTL": 3600,
+            "ResourceRecords": [{"Value": "0 1 443 {{ $.Values.hostname }}."}]
+          }
+        }
+    {{- end }}{{/* if $cfg.dns.enabled */}}
+    {{- end }}{{/* range .Values.domains */}}
+      ]
+    }
+    CHANGESET
+
+    echo "Submitting DNS changes..."
+    aws route53 change-resource-record-sets \
+      --hosted-zone-id "${ZONE_ID}" \
+      --change-batch file:///tmp/changes.json
+
+    echo "DNS records created/updated successfully."
+
+    {{- $hasAutoGenDomains := false }}
+    {{- range $cfg := .Values.domains }}
+    {{- if include "mox.domainNeedsDkimGeneration" (dict "domain" $cfg "global" $) }}
+    {{- $hasAutoGenDomains = true }}
+    {{- end }}
+    {{- end }}
+    {{- if $hasAutoGenDomains }}
+    # --- Auto-generated DKIM DNS records ---
+    # Read public keys from generated K8s Secret at runtime
+    DKIM_SECRET_NAME="{{ include "mox.dkimGeneratedSecretName" . }}"
+    TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+    CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    NS="{{ .Release.Namespace }}"
+    API="https://kubernetes.default.svc/api/v1/namespaces/${NS}/secrets/${DKIM_SECRET_NAME}"
+
+    echo "Reading auto-generated DKIM public keys from secret ${DKIM_SECRET_NAME}..."
+    DKIM_SECRET=$(curl -sf --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$API")
+    if [ -z "$DKIM_SECRET" ]; then
+      echo "WARNING: Could not read DKIM secret ${DKIM_SECRET_NAME}. Auto-generated DKIM DNS records will be skipped."
+    else
+      read_pubkey() {
+        local KEY_NAME="$1"
+        # Extract base64-encoded value from JSON, then decode it.
+        # K8s secret values are base64-encoded; decoding gives the pubkey string.
+        local B64_VAL
+        B64_VAL=$(printf '%s' "$DKIM_SECRET" | sed -n "s/.*\"${KEY_NAME}\": *\"\([^\"]*\)\".*/\1/p")
+        if [ -n "$B64_VAL" ]; then
+          printf '%s' "$B64_VAL" | base64 -d 2>/dev/null || printf '%s' "$B64_VAL"
+        fi
+      }
+
+      # Build a Route53 TXT record value with proper quoting.
+      # DNS TXT strings are limited to 255 chars each; long values must be
+      # split into multiple quoted strings (e.g. "chunk1" "chunk2").
+      # Output is escaped for embedding in JSON: \"chunk1\" \"chunk2\"
+      txt_quote() {
+        local val="$1" result="" chunk clen
+        while [ ${#val} -gt 0 ]; do
+          chunk=$(printf '%.255s' "$val")
+          clen=${#chunk}
+          result="${result}${result:+ }\\\"${chunk}\\\""
+          if [ $clen -ge ${#val} ]; then
+            val=""
+          else
+            val=$(printf '%s' "$val" | tail -c +$((clen + 1)))
+          fi
+        done
+        printf '%s' "$result"
+      }
+
+      DKIM_JSON="/tmp/dkim_changes.json"
+      printf '{"Changes":[' > "$DKIM_JSON"
+      DKIM_FIRST=true
+
+      {{- range $cfg := .Values.domains }}
+      {{- if include "mox.domainNeedsDkimGeneration" (dict "domain" $cfg "global" $) }}
+      {{- $effSel := include "mox.dkimSelectorsForDomain" (dict "domain" $cfg "global" $) | fromYaml -}}
+      {{- range $sel, $selCfg := $effSel }}
+      DKIM_PUBKEY=$(read_pubkey "{{ $sel }}-{{ $cfg.name }}.pubkey")
+      if [ -n "$DKIM_PUBKEY" ]; then
+        echo "  Found public key for {{ $sel }}._domainkey.{{ $cfg.name }}"
+        DKIM_TXT_QUOTED=$(txt_quote "v=DKIM1; k={{ $selCfg.algorithm }}; p=${DKIM_PUBKEY}")
+        if [ "$DKIM_FIRST" = "true" ]; then
+          DKIM_FIRST=false
+        else
+          printf ',' >> "$DKIM_JSON"
+        fi
+        printf '{"Action":"UPSERT","ResourceRecordSet":{"Name":"{{ $sel }}._domainkey.{{ $cfg.name }}.","Type":"TXT","TTL":3600,"ResourceRecords":[{"Value":"%s"}]}}' \
+          "$DKIM_TXT_QUOTED" >> "$DKIM_JSON"
+      else
+        echo "  WARNING: No public key found for {{ $sel }}._domainkey.{{ $cfg.name }}"
+      fi
+      {{- end }}
+      {{- end }}
+      {{- end }}
+
+      printf ']}' >> "$DKIM_JSON"
+      if [ "$DKIM_FIRST" = "false" ]; then
+        echo "Submitting auto-generated DKIM DNS records..."
+        aws route53 change-resource-record-sets \
+          --hosted-zone-id "${ZONE_ID}" \
+          --change-batch file://"$DKIM_JSON"
+        echo "Auto-generated DKIM DNS records created/updated."
+      fi
+    fi
+    {{- end }}
+{{- end }}

@@ -1,0 +1,131 @@
+{{- $anyDeleteOnUninstall := false -}}
+{{- range $d := .Values.domains -}}
+  {{- if and $d.dnssec $d.dnssec.enabled $d.dnssec.deleteOnUninstall -}}
+    {{- $anyDeleteOnUninstall = true -}}
+  {{- end -}}
+{{- end -}}
+{{- if $anyDeleteOnUninstall }}
+{{- include "mox.validateSameDnssecProvider" . }}
+{{- $dnssecProviderName := include "mox.dnssecProvider" . }}
+{{- include "mox.requireProvider" (dict "feature" "dnssec" "name" $dnssecProviderName "expectedPlatform" "aws" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" $dnssecProviderName "providers" .Values.providers) | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-dnssec-aws-delete
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "8"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  teardown-dnssec.sh: |
+    #!/bin/sh
+    set -e
+
+    ZONE_ID="{{ required "dnssec provider config.hostedZoneId is required" $cfg.hostedZoneId }}"
+    {{- $dnssecDomain := dict -}}
+    {{- range $d := .Values.domains -}}
+      {{- if and $d.dnssec $d.dnssec.enabled $d.dnssec.deleteOnUninstall -}}
+        {{- if not (hasKey $dnssecDomain "name") -}}
+          {{- $_ := set $dnssecDomain "name" $d.name -}}
+          {{- $_ := set $dnssecDomain "kskName" (default (printf "%s-ksk" $d.name) (dig "dnssec" "kskName" "" $d)) -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end }}
+    KSK_NAME="{{ $dnssecDomain.kskName }}"
+    KMS_REGION="us-east-1"
+
+    echo "=== Route53 DNSSEC Teardown for zone ${ZONE_ID} ==="
+
+    # ---------------------------------------------------------------
+    # Step 1: Check current DNSSEC status
+    # ---------------------------------------------------------------
+    DNSSEC_STATUS=$(aws route53 get-dnssec --hosted-zone-id "$ZONE_ID" \
+      --query 'Status.ServeSignature' --output text 2>/dev/null || echo "NOT_SIGNING")
+
+    if [ "$DNSSEC_STATUS" = "NOT_SIGNING" ]; then
+      echo "DNSSEC is not enabled on zone ${ZONE_ID}. Nothing to tear down."
+      exit 0
+    fi
+
+    echo "DNSSEC status: ${DNSSEC_STATUS}. Proceeding with teardown..."
+
+    # ---------------------------------------------------------------
+    # Step 2: Disassociate DS record from registrar
+    # ---------------------------------------------------------------
+    DOMAIN=$(aws route53 get-hosted-zone --id "$ZONE_ID" \
+      --query 'HostedZone.Name' --output text | sed 's/\.$//')
+
+    echo "Checking DS record registration for domain ${DOMAIN}..."
+
+    EXISTING_DS=$(aws route53domains get-domain-detail --domain-name "$DOMAIN" \
+      --query 'DnssecKeys[0].Id' --output text 2>/dev/null || echo "")
+
+    if [ -n "$EXISTING_DS" ] && [ "$EXISTING_DS" != "None" ]; then
+      echo "Disassociating DS record (ID: ${EXISTING_DS}) from registrar..."
+      aws route53domains disassociate-delegation-signer-from-domain \
+        --domain-name "$DOMAIN" \
+        --id "$EXISTING_DS" 2>/dev/null || {
+          echo "WARNING: Could not disassociate DS record. It may need manual removal."
+        }
+      echo "DS record disassociation requested. Waiting for propagation..."
+      sleep 10
+    else
+      echo "No DS record found at registrar. Skipping."
+    fi
+
+    # ---------------------------------------------------------------
+    # Step 3: Disable DNSSEC signing on the zone
+    # ---------------------------------------------------------------
+    echo "Disabling DNSSEC signing on zone ${ZONE_ID}..."
+
+    CHANGE_ID=$(aws route53 disable-hosted-zone-dnssec \
+      --hosted-zone-id "$ZONE_ID" \
+      --query 'ChangeInfo.Id' --output text 2>/dev/null || echo "")
+
+    if [ -n "$CHANGE_ID" ] && [ "$CHANGE_ID" != "None" ]; then
+      echo "DNSSEC disable requested (change: ${CHANGE_ID}). Waiting..."
+      aws route53 wait resource-record-sets-changed --id "$CHANGE_ID" 2>/dev/null || true
+    fi
+
+    echo "DNSSEC signing disabled."
+
+    # ---------------------------------------------------------------
+    # Step 4: Deactivate the KSK
+    # ---------------------------------------------------------------
+    KSK_EXISTS=$(aws route53 get-dnssec --hosted-zone-id "$ZONE_ID" \
+      --query "KeySigningKeys[?Name=='${KSK_NAME}'].Status" --output text 2>/dev/null || echo "")
+
+    if [ -n "$KSK_EXISTS" ] && [ "$KSK_EXISTS" != "None" ] && [ "$KSK_EXISTS" != "" ]; then
+      if [ "$KSK_EXISTS" = "ACTIVE" ]; then
+        echo "Deactivating KSK '${KSK_NAME}'..."
+        aws route53 deactivate-key-signing-key \
+          --hosted-zone-id "$ZONE_ID" \
+          --name "$KSK_NAME" 2>/dev/null || {
+            echo "WARNING: Could not deactivate KSK."
+          }
+      else
+        echo "KSK '${KSK_NAME}' is already inactive (status: ${KSK_EXISTS})."
+      fi
+
+      # ---------------------------------------------------------------
+      # Step 5: Delete the KSK
+      # ---------------------------------------------------------------
+      echo "Deleting KSK '${KSK_NAME}'..."
+      aws route53 delete-key-signing-key \
+        --hosted-zone-id "$ZONE_ID" \
+        --name "$KSK_NAME" 2>/dev/null || {
+          echo "WARNING: Could not delete KSK. It may need manual removal."
+        }
+      echo "KSK deleted."
+    else
+      echo "KSK '${KSK_NAME}' not found. Skipping deactivation and deletion."
+    fi
+
+    # NOTE: The KMS key is intentionally NOT deleted.
+    # It is reusable, has no idle cost, and deleting KMS keys is irreversible.
+
+    echo "=== DNSSEC teardown complete ==="
+{{- end }}

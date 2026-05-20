@@ -1,0 +1,463 @@
+# -- Override the chart name
+nameOverride: ""
+# -- Override the full release name
+fullnameOverride: ""
+
+# -- Mox container image settings
+image:
+  repository: ghcr.io/thenotary/mox
+  # -- Pin to a specific version; see https://github.com/thenotary/mox/pkgs/container/mox
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# -- Fully qualified hostname for the mail server (used in SMTP EHLO, MX records, TLS SNI)
+hostname: mail.example.com
+
+# -- Static public IPs of the LoadBalancer. These are set as NATIPs in mox.conf so
+# mox knows its public-facing addresses for SPF, reverse DNS validation, and autoconfig.
+# Optional when outboundPublicIpManagement is enabled (IPs discovered at runtime from ASO).
+# Required when outboundPublicIpManagement is disabled.
+staticPublicIPs:
+  # -- Public IPv4 address
+  ipv4: ""
+  # -- Public IPv6 address (optional)
+  ipv6: ""
+
+# -- Additional outbound IPs to include in SPF records.
+# Use when the server sends mail from a different IP than the LoadBalancer frontend
+# (e.g. AKS default outbound SNAT IPs).
+outboundIPs: []
+  # - "20.94.16.26"
+
+# -- Log level: error, info, debug, trace, traceauth, tracedata
+logLevel: info
+
+# -- Admin panel credentials
+admin:
+  # -- Bcrypt hash of the admin password (generate with: htpasswd -nbBC 10 "" 'yourpassword' | cut -d: -f2)
+  passwordHash: ""
+  # -- Reference an existing Kubernetes Secret containing the admin password hash
+  # The secret must have a key named 'admin-password-hash'
+  existingSecret: ""
+
+# -- Reference an existing Secret for all mox config secrets (domains.conf, DKIM keys, admin password).
+# When set, the chart will not create its own Secret.
+existingSecret: ""
+
+# -- Config persistence behavior.
+# Mox config files are seeded from Helm values onto the data PVC at startup.
+# mox.conf is always overwritten (Helm is source of truth for listeners/hostname).
+# domains.conf uses seed-once semantics: it is only written if it does not already
+# exist on the PVC, preserving changes made via the admin UI across pod restarts.
+config:
+  # -- When true, overwrite domains.conf on the PVC even if it already exists.
+  # Use this after changing domain/account settings in Helm values to push those
+  # changes to a running deployment. Set back to false after deploying.
+  forceReseed: false
+
+# -- Host-level TLSRPT configuration (HostTLSRPT in mox.conf).
+# Enables DANE connectivity reporting for the mail host itself.
+# When enabled, the DNS record (_smtp._tls.<hostname>) is created automatically
+# via the referenced DNS provider.
+hostTlsrpt:
+  enabled: false
+  # -- Name of the provider from the providers map (must have platform: aws)
+  provider: ""
+  account: postmaster
+  localpart: tlsrpt
+  mailbox: TLSRPT
+
+# -- Email domains to host. Each entry is an object with a `name` field for the domain.
+# @default -- See example below
+domains: []
+  # - name: example.com
+  #   description: "Primary domain"
+  #   dkim:
+  #     # -- Per-domain DKIM toggle.
+  #     # When true, DKIM key management is enabled for this domain using the
+  #     # referenced provider. When false or omitted, DKIM is not managed.
+  #     # Domains with explicit privateKey or existingSecret values are never
+  #     # auto-generated regardless of this setting.
+  #     enabled: true
+  #     # -- Name of the provider from the providers map (must have platform: dkimKeygen)
+  #     provider: dkimManager
+  #     selectors:
+  #       sel1:
+  #         # -- DKIM signing algorithm: ed25519 or rsa
+  #         algorithm: ed25519
+  #         # -- Base64-encoded private key (for inline config; prefer existingSecret for production)
+  #         privateKey: ""
+  #         # -- Base64-encoded public key (raw key bytes, not full DER).
+  #         # Used to populate the DKIM DNS TXT record when dns.enabled is true.
+  #         # For ed25519: openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64
+  #         publicKey: ""
+  #         # -- Name of an existing K8s Secret containing the DKIM private key
+  #         # The secret must have a key named '<selector>-<domain>.privkey'
+  #         existingSecret: ""
+  #     # -- List of selector names to use for signing outbound mail
+  #     sign:
+  #       - sel1
+  #   dmarc:
+  #     localpart: dmarcreports
+  #     account: postmaster
+  #     mailbox: DMARC
+  #     # -- DMARC policy: none, quarantine, or reject (default: none)
+  #     policy: none
+  #   mtasts:
+  #     # -- MTA-STS mode: enforce, testing, or none
+  #     mode: enforce
+  #     # -- Max age as a Go duration (e.g., 24h, 168h)
+  #     maxAge: 24h
+  #   tlsrpt:
+  #     enabled: true
+  #     # -- Name of the provider from the providers map (must have platform: aws)
+  #     provider: dnsProvider
+  #     localpart: tlsreports
+  #     account: postmaster
+  #     mailbox: TLSRPT
+  #   # -- Per-domain DNS record automation.
+  #   # Creates all required mail DNS records (A, MX, SPF, DKIM, DMARC, MTA-STS,
+  #   # TLSRPT, autoconfig/mta-sts CNAMEs, SRV records) via a post-install/post-upgrade
+  #   # Helm hook Job. Records use UPSERT semantics (idempotent on every upgrade).
+  #   # A pre-delete hook removes all managed records on helm uninstall.
+  #   dns:
+  #     enabled: true
+  #     # -- Name of the provider from the providers map (must have platform: aws)
+  #     provider: dnsProvider
+  #   # -- Per-domain DNSSEC zone signing and DANE TLSA record automation.
+  #   # When enabled, a post-install/post-upgrade hook sets up DNSSEC signing on the
+  #   # DNS zone (creates KMS key, KSK, enables signing, registers DS record) and
+  #   # creates DANE TLSA records for SMTP ports. Also enables HostPrivateKeyFiles
+  #   # in mox.conf for DANE TLSA generation.
+  #   # Requires a DNSSEC-capable DNS provider (Route53, Cloudflare). Azure DNS does
+  #   # NOT support DNSSEC.
+  #   dnssec:
+  #     enabled: true
+  #     # -- Name of the provider from the providers map (typically the same as dns.provider)
+  #     provider: dnsProvider
+  #     # -- KMS key alias for the DNSSEC signing key.
+  #     # Defaults to "alias/<domain-name>-dnssec" if left empty.
+  #     kmsKeyAlias: ""
+  #     # -- Name for the Key Signing Key (KSK).
+  #     # Defaults to "<domain-name>-ksk" if left empty.
+  #     kskName: ""
+  #     # -- Tear down DNSSEC on helm uninstall. Defaults to false because DNSSEC
+  #     # teardown is zone-scoped and destructive — disabling it affects ALL records
+  #     # in the hosted zone, breaks DANE validation, and removes the DS record from
+  #     # the registrar. The KMS key is never deleted (reusable, no idle cost).
+  #     deleteOnUninstall: false
+
+# -- User accounts. Each key is an account name.
+# Accounts defined here are only used for **initial bootstrapping** (seed-once).
+# After the first successful deploy, manage accounts exclusively through the mox
+# admin UI or CLI — changes here will NOT take effect on upgrade unless you set
+# config.forceReseed to true.
+# @default -- See example below
+accounts:
+  # postmaster:
+  #   domain: example.com
+  #   fullName: "Postmaster"
+  #   destinations:
+  #     - address: postmaster@example.com
+  #       mailbox: Inbox
+
+# -- Listener configuration for mox services.
+# Ports are configurable; set enabled: false to disable a protocol entirely.
+listeners:
+  smtp:
+    enabled: true
+    port: 25
+  submissions:
+    enabled: true
+    port: 465
+  submission:
+    enabled: true
+    port: 587
+  imaps:
+    enabled: true
+    port: 993
+  imap:
+    enabled: true
+    port: 143
+  webmail:
+    enabled: true
+  webapi:
+    enabled: false
+  admin:
+    enabled: true
+  metrics:
+    enabled: true
+    port: 8010
+
+# -- Kubernetes Service configuration for the mail server.
+# Ignored when outboundPublicIpManagement is enabled (the chart hardcodes LoadBalancer +
+# externalTrafficPolicy: Local and derives annotations from the provider config).
+# Required when outboundPublicIpManagement is disabled.
+service:
+  type: LoadBalancer
+  # -- Controls how traffic is routed to the mox pod.
+  #   Local  — Preserves the real client source IP. Required for mox's spam filtering,
+  #            SPF validation, and IP-based rate limiting. Traffic is only routed to
+  #            nodes that run the pod (no cross-node hops), which may cause uneven
+  #            load distribution in multi-node clusters.
+  #   Cluster — Kubernetes may SNAT (masquerade) traffic, replacing the client IP with
+  #             an internal node IP. Mox will see all connections as originating from
+  #             cluster nodes, which breaks IP reputation, SPF checks, and junk
+  #             filtering. Allows even load distribution across nodes.
+  externalTrafficPolicy: Local
+  # -- Pre-provisioned LoadBalancer IP. Leave empty to let the cloud provider assign one.
+  loadBalancerIP: ""
+  # -- Additional annotations for the Service (e.g., cloud provider-specific settings).
+  annotations: {}
+
+# -- Outbound SMTP relay/smarthost configuration.
+# Required for Azure subscriptions where port 25 outbound is blocked (non-Enterprise).
+# When enabled, all outbound mail routes through an authenticated SMTP relay.
+transport:
+  enabled: false
+  # -- Transport type: submissions (port 465, TLS) or submission (port 587, STARTTLS)
+  type: submissions
+  # -- Relay host (e.g., smtp.sendgrid.net, smtp-relay.gmail.com, smtp.azurecomm.net)
+  host: ""
+  # -- Relay port
+  port: 465
+  auth:
+    username: ""
+    # -- Relay password (plain text; prefer existingSecret for production)
+    password: ""
+    # -- Name of an existing K8s Secret containing the relay password
+    # The secret must have a key named 'transport-password'
+    existingSecret: ""
+    # -- SMTP auth mechanisms to use
+    mechanisms:
+      - PLAIN
+
+# -- Self-delivery configuration.
+# When enabled, messages sent between accounts on the same domain are delivered
+# via localhost:25 instead of through the external IP. This avoids SPF failures
+# that occur when Kubernetes hairpin NAT changes the source IP of the self-
+# connection. Also adds ip4:127.0.0.1 to the SPF DNS record.
+selfDelivery:
+  enabled: false
+
+# =============================================================================
+# PROVIDERS
+# =============================================================================
+# Named provider definitions for external platform integrations. Each provider
+# has a `platform` (implementation identifier) and `config` (platform-specific
+# settings including credentials). Features reference providers by name.
+#
+# Supported platforms:
+#   aws         — AWS Route53 for DNS record and DNSSEC management
+#   azureAso    — Azure Service Operator v2 for Public IP and reverse DNS
+#   certManager — cert-manager for TLS certificate lifecycle
+#   dkimKeygen  — DKIM key auto-generation via Helm hook Job
+#
+# @default -- No providers configured (all features disabled by default)
+providers:
+  # -- DKIM key-generation infrastructure.
+  # Controls the pre-install/pre-upgrade Helm hook Job that generates DKIM signing
+  # keys. DKIM management is enabled per domain (domains[].dkim.enabled: true,
+  # domains[].dkim.provider: dkimManager). Generated keys are stored in a dedicated
+  # Kubernetes Secret that persists across upgrades and even helm uninstall
+  # (resource-policy: keep). The DNS hook reads generated public keys at runtime
+  # from the K8s API so DKIM TXT records are published automatically.
+  dkimManager:
+    platform: dkimKeygen
+    config:
+      # -- Container image for the keygen hook Job (must have openssl and curl).
+      image: alpine:3.20
+      # -- Override the generated DKIM Secret name. Leave empty to use the default
+      # ({release}-mox-dkim).
+      secretName: ""
+      # -- Default DKIM selectors to generate when a domain has dkim.enabled: true
+      # but no explicit selectors. Each key is a selector name, value is the algorithm
+      # (ed25519 or rsa).
+      defaultSelectors:
+        sel1: ed25519
+        rsa1: rsa
+  #
+  # dnsProvider:
+  #   platform: aws
+  #   config:
+  #     # -- Route53 hosted zone ID
+  #     hostedZoneId: ""
+  #     # -- AWS region for API calls
+  #     region: us-east-1
+  #     # -- AWS IAM access key ID
+  #     accessKeyId: ""
+  #     # -- AWS IAM secret access key
+  #     secretAccessKey: ""
+  #     # -- Container image for AWS CLI hook Jobs
+  #     image: amazon/aws-cli:2.22.35
+  #
+  # ipProvider:
+  #   platform: azureAso
+  #   config:
+  #     # -- Azure subscription ID. When set, the PublicIPAddress owner reference
+  #     # uses an ARM ID so the resources.azure.com/ResourceGroup CRD is not required.
+  #     subscriptionId: ""
+  #     # -- Azure resource group for the Public IP resource
+  #     resourceGroup: ""
+  #     # -- Azure region (e.g., eastus, westeurope)
+  #     location: eastus
+  #     publicIp:
+  #       # -- Name for the Azure Public IP resource
+  #       name: ""
+  #       # -- Domain name label (e.g., "mail" creates mail.<region>.cloudapp.azure.com)
+  #       domainNameLabel: ""
+  #
+  # certProvider:
+  #   platform: certManager
+  #   config:
+  #     issuerRef:
+  #       name: letsencrypt-prod
+  #       kind: ClusterIssuer
+  #     # -- Keep the Certificate and its TLS Secret across helm uninstall to avoid
+  #     # hitting Let's Encrypt rate limits during troubleshooting.
+  #     keepOnUninstall: true
+  #     # -- Additional DNS names to include in the certificate beyond hostname
+  #     # and domain subdomains (e.g., autoconfig.*, mta-sts.*)
+  #     additionalDnsNames: []
+
+# =============================================================================
+# FEATURES
+# =============================================================================
+# Each feature references a named provider from the providers map above.
+# When a feature is enabled, the chart resolves the provider config and renders
+# platform-specific templates. If the referenced provider is not defined or is
+# missing required fields, template rendering fails with a clear error message.
+#
+# DNS and DNSSEC are configured per-domain (see domains[] above).
+# All other features are configured at the root level below.
+
+# -- Managed outbound public IP automation.
+# Creates and manages a cloud-provider Public IP resource for the mail server's
+# LoadBalancer. When enabled with azureAso, creates an ASO PublicIPAddress CRD,
+# discovers the assigned IP at startup, and patches reverse DNS (PTR) after
+# forward DNS propagates. Also drives the Service annotations for Azure PIP binding.
+# When enabled, the service section is ignored and staticPublicIPs.ipv4 is optional.
+outboundPublicIpManagement:
+  enabled: false
+  # -- Name of the provider from the providers map (must have platform: azureAso)
+  provider: ""
+
+# -- TLS certificate automation.
+# Creates a cert-manager Certificate resource covering the hostname, all hosted
+# domains, and their autoconfig/mta-sts subdomains. The resulting TLS secret is
+# mounted into the mox container. Disable if providing certs manually.
+tlsManagement:
+  enabled: false
+  # -- Name of the provider from the providers map (must have platform: certManager)
+  provider: ""
+
+# -- DNSSEC-validating DNS resolver sidecar (unbound).
+# Kubernetes CoreDNS does not perform DNSSEC validation. When enabled, an unbound
+# sidecar runs on 127.0.0.1:53 with DNSSEC validation and Extended DNS Errors (EDE),
+# and the pod's dnsPolicy is set to None with nameserver 127.0.0.1. This satisfies
+# mox's loopback-resolver check for DNSSEC-verified DNS and enables DANE verification
+# of outbound SMTP connections.
+dnssecResolverSidecar:
+  enabled: false
+  image:
+    repository: mvance/unbound
+    tag: "1.22.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# -- Persistent storage for mox data (BoltDB databases, message files, queue).
+# Mox uses an embedded single-writer database — ReadWriteOnce is required.
+persistence:
+  enabled: true
+  # -- Storage size
+  size: 10Gi
+  # -- Storage class name. Leave empty to use the cluster default.
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  # -- Use an existing PVC instead of creating one
+  existingClaim: ""
+
+# -- Seconds to wait in the preStop hook before mox receives SIGTERM.
+# This allows kube-proxy to update iptables/endpoints so in-flight connections
+# are not routed to a terminating pod. Mox's own graceful shutdown (~4s) runs
+# after this sleep finishes.
+preStopSleepSeconds: 5
+
+# -- Total time Kubernetes waits for the pod to terminate after sending SIGTERM.
+# Must be > preStopSleepSeconds + mox graceful shutdown time (~4s).
+# Formula: preStopSleepSeconds (5) + mox shutdown (4) + safety margin (6) = 15
+terminationGracePeriodSeconds: 15
+
+# -- Health probes for the mox container.
+# Decoupled from listener configuration so probes are always active.
+# Default target is port 80 (webmail/admin listener, always available).
+probes:
+  # -- Enable startup, readiness, and liveness probes
+  enabled: true
+  # -- Probe type: tcpSocket or httpGet. Use httpGet with mox versions that
+  # include the /healthz endpoint for a more meaningful health signal (returns
+  # 503 during graceful shutdown).
+  type: httpGet
+  # -- TCP port to probe. Use any always-enabled port: 80 (HTTP), 443 (HTTPS),
+  # or the metrics port (8010) if listeners.metrics.enabled is true.
+  port: 80
+  # -- httpGet probe settings (used when type is httpGet)
+  httpGet:
+    path: /healthz
+  startup:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    # -- Allow up to ~155s for startup (5 + 30*5). Covers init containers +
+    # mox boot + BoltDB open on large data sets.
+    failureThreshold: 30
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  liveness:
+    initialDelaySeconds: 15
+    periodSeconds: 30
+
+# -- Pod resource requests and limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# -- Node selector for pod scheduling
+nodeSelector: {}
+# -- Tolerations for pod scheduling
+tolerations: []
+# -- Affinity rules for pod scheduling
+affinity: {}
+
+# -- Prometheus monitoring
+metrics:
+  serviceMonitor:
+    # -- Create a ServiceMonitor resource (requires Prometheus Operator)
+    enabled: false
+    # -- Scrape interval
+    interval: 30s
+    # -- Additional labels for ServiceMonitor discovery
+    labels: {}
+
+# -- NetworkPolicy for restricting pod traffic
+networkPolicy:
+  enabled: false
+
+# -- PodDisruptionBudget protects the mox pod from involuntary evictions
+# (e.g. node drains). With minAvailable: 1, Kubernetes will not voluntarily
+# evict the pod unless a replacement can be scheduled first.
+podDisruptionBudget:
+  enabled: true
+  # -- Minimum number of pods that must remain available during disruptions.
+  minAvailable: 1

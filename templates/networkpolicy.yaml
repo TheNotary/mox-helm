@@ -1,0 +1,69 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mox.fullname" . }}
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mox.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow mail and web traffic from anywhere
+    - ports:
+        {{- if .Values.listeners.smtp.enabled }}
+        - port: {{ .Values.listeners.smtp.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.listeners.submissions.enabled }}
+        - port: {{ .Values.listeners.submissions.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.listeners.submission.enabled }}
+        - port: {{ .Values.listeners.submission.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.listeners.imaps.enabled }}
+        - port: {{ .Values.listeners.imaps.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.listeners.imap.enabled }}
+        - port: {{ .Values.listeners.imap.port }}
+          protocol: TCP
+        {{- end }}
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+    # Allow metrics scraping (cluster-internal)
+    {{- if .Values.listeners.metrics.enabled }}
+    - ports:
+        - port: {{ .Values.listeners.metrics.port }}
+          protocol: TCP
+    {{- end }}
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Outbound SMTP
+    - ports:
+        - port: 25
+          protocol: TCP
+    # HTTPS (cert validation, MTA-STS checks, OCSP)
+    - ports:
+        - port: 443
+          protocol: TCP
+    {{- if .Values.transport.enabled }}
+    # Smarthost relay
+    - ports:
+        - port: {{ .Values.transport.port }}
+          protocol: TCP
+    {{- end }}
+{{- end }}

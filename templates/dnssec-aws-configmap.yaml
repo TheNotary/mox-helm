@@ -1,0 +1,227 @@
+{{- if include "mox.anyDomainHasDnssec" . }}
+{{- include "mox.validateSameDnssecProvider" . }}
+{{- $dnssecProviderName := include "mox.dnssecProvider" . }}
+{{- include "mox.requireProvider" (dict "feature" "dnssec" "name" $dnssecProviderName "expectedPlatform" "aws" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" $dnssecProviderName "providers" .Values.providers) | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-dnssec-aws
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  setup-dnssec.sh: |
+    #!/bin/sh
+    set -e
+
+    ZONE_ID="{{ required "dnssec provider config.hostedZoneId is required" $cfg.hostedZoneId }}"
+    {{- $dnssecDomain := dict -}}
+    {{- range $d := .Values.domains -}}
+      {{- if and $d.dnssec $d.dnssec.enabled -}}
+        {{- if not (hasKey $dnssecDomain "name") -}}
+          {{- $_ := set $dnssecDomain "name" $d.name -}}
+          {{- $_ := set $dnssecDomain "kmsKeyAlias" (default (printf "alias/%s-dnssec" $d.name) (dig "dnssec" "kmsKeyAlias" "" $d)) -}}
+          {{- $_ := set $dnssecDomain "kskName" (default (printf "%s-ksk" $d.name) (dig "dnssec" "kskName" "" $d)) -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end }}
+    KMS_KEY_ALIAS="{{ $dnssecDomain.kmsKeyAlias }}"
+    KSK_NAME="{{ $dnssecDomain.kskName }}"
+    KMS_REGION="us-east-1"
+
+    echo "=== Route53 DNSSEC Setup for zone ${ZONE_ID} ==="
+
+    # ---------------------------------------------------------------
+    # Step 1: Check if DNSSEC signing is already enabled
+    # ---------------------------------------------------------------
+    DNSSEC_STATUS=$(aws route53 get-dnssec --hosted-zone-id "$ZONE_ID" \
+      --query 'Status.ServeSignature' --output text 2>/dev/null || echo "NOT_SIGNING")
+
+    if [ "$DNSSEC_STATUS" = "SIGNING" ]; then
+      echo "DNSSEC signing is already enabled on zone ${ZONE_ID}. Nothing to do."
+      exit 0
+    fi
+
+    echo "DNSSEC is not yet enabled (status: ${DNSSEC_STATUS}). Setting up..."
+
+    # ---------------------------------------------------------------
+    # Step 2: Create or find KMS key by alias
+    # ---------------------------------------------------------------
+    KMS_KEY_ARN=$(aws kms describe-key --key-id "$KMS_KEY_ALIAS" \
+      --region "$KMS_REGION" --query 'KeyMetadata.Arn' --output text 2>/dev/null || echo "")
+
+    if [ -z "$KMS_KEY_ARN" ] || [ "$KMS_KEY_ARN" = "None" ]; then
+      echo "Creating KMS key with alias ${KMS_KEY_ALIAS} in ${KMS_REGION}..."
+
+      KMS_KEY_ARN=$(aws kms create-key \
+        --region "$KMS_REGION" \
+        --key-usage SIGN_VERIFY \
+        --key-spec ECC_NIST_P256 \
+        --description "DNSSEC KSK for Route53 zone ${ZONE_ID}" \
+        --query 'KeyMetadata.Arn' --output text)
+
+      echo "Created KMS key: ${KMS_KEY_ARN}"
+
+      # Create alias for idempotent lookup next time
+      aws kms create-alias \
+        --region "$KMS_REGION" \
+        --alias-name "$KMS_KEY_ALIAS" \
+        --target-key-id "$KMS_KEY_ARN"
+
+      echo "Created alias: ${KMS_KEY_ALIAS}"
+    else
+      echo "KMS key already exists: ${KMS_KEY_ARN}"
+    fi
+
+    # ---------------------------------------------------------------
+    # Step 3: Ensure Route53 DNSSEC service has access to the key
+    # ---------------------------------------------------------------
+    KMS_KEY_ID=$(echo "$KMS_KEY_ARN" | awk -F/ '{print $NF}')
+
+    # Get current key policy
+    CURRENT_POLICY=$(aws kms get-key-policy \
+      --region "$KMS_REGION" \
+      --key-id "$KMS_KEY_ID" \
+      --policy-name default \
+      --output text 2>/dev/null || echo "")
+
+    if echo "$CURRENT_POLICY" | grep -q "dnssec-route53.amazonaws.com"; then
+      echo "KMS key policy already grants Route53 DNSSEC access."
+    else
+      echo "Updating KMS key policy to grant Route53 DNSSEC access..."
+
+      # Get the AWS account ID from the key ARN
+      ACCOUNT_ID=$(echo "$KMS_KEY_ARN" | awk -F: '{print $5}')
+
+      cat > /tmp/key-policy.json << POLICY
+    {
+      "Version": "2012-10-17",
+      "Id": "dnssec-policy",
+      "Statement": [
+        {
+          "Sid": "Enable IAM policies",
+          "Effect": "Allow",
+          "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:root"},
+          "Action": "kms:*",
+          "Resource": "*"
+        },
+        {
+          "Sid": "Allow Route53 DNSSEC",
+          "Effect": "Allow",
+          "Principal": {"Service": "dnssec-route53.amazonaws.com"},
+          "Action": ["kms:DescribeKey", "kms:GetPublicKey", "kms:Sign"],
+          "Resource": "*",
+          "Condition": {
+            "StringEquals": {"aws:SourceAccount": "${ACCOUNT_ID}"},
+            "ArnLike": {"aws:SourceArn": "arn:aws:route53:::hostedzone/*"}
+          }
+        },
+        {
+          "Sid": "Allow Route53 DNSSEC CreateGrant",
+          "Effect": "Allow",
+          "Principal": {"Service": "dnssec-route53.amazonaws.com"},
+          "Action": "kms:CreateGrant",
+          "Resource": "*",
+          "Condition": {
+            "Bool": {"kms:GrantIsForAWSResource": "true"}
+          }
+        }
+      ]
+    }
+    POLICY
+
+      aws kms put-key-policy \
+        --region "$KMS_REGION" \
+        --key-id "$KMS_KEY_ID" \
+        --policy-name default \
+        --policy file:///tmp/key-policy.json
+
+      echo "KMS key policy updated."
+    fi
+
+    # ---------------------------------------------------------------
+    # Step 4: Create Key Signing Key (KSK)
+    # ---------------------------------------------------------------
+    EXISTING_KSK=$(aws route53 get-dnssec --hosted-zone-id "$ZONE_ID" \
+      --query "KeySigningKeys[?Name=='${KSK_NAME}'].Name" --output text 2>/dev/null || echo "")
+
+    if [ -n "$EXISTING_KSK" ] && [ "$EXISTING_KSK" != "None" ]; then
+      echo "KSK '${KSK_NAME}' already exists."
+    else
+      echo "Creating Key Signing Key '${KSK_NAME}'..."
+
+      CALLER_REF="dnssec-${ZONE_ID}-$(date +%s)"
+      aws route53 create-key-signing-key \
+        --hosted-zone-id "$ZONE_ID" \
+        --key-management-service-arn "$KMS_KEY_ARN" \
+        --name "$KSK_NAME" \
+        --caller-reference "$CALLER_REF" \
+        --status ACTIVE
+
+      echo "KSK created."
+    fi
+
+    # ---------------------------------------------------------------
+    # Step 5: Enable DNSSEC signing on the zone
+    # ---------------------------------------------------------------
+    echo "Enabling DNSSEC signing on zone ${ZONE_ID}..."
+
+    CHANGE_ID=$(aws route53 enable-hosted-zone-dnssec \
+      --hosted-zone-id "$ZONE_ID" \
+      --query 'ChangeInfo.Id' --output text 2>/dev/null || echo "")
+
+    if [ -n "$CHANGE_ID" ] && [ "$CHANGE_ID" != "None" ]; then
+      echo "DNSSEC signing enable requested (change: ${CHANGE_ID}). Waiting..."
+      aws route53 wait resource-record-sets-changed --id "$CHANGE_ID" 2>/dev/null || true
+    fi
+
+    echo "DNSSEC signing is now enabled."
+
+    # ---------------------------------------------------------------
+    # Step 6: Register DS record at Route53 Domains
+    # ---------------------------------------------------------------
+    echo "Retrieving DS record info..."
+
+    DS_INFO=$(aws route53 get-dnssec --hosted-zone-id "$ZONE_ID" \
+      --query 'KeySigningKeys[0].DSRecord' --output text 2>/dev/null || echo "")
+
+    if [ -z "$DS_INFO" ] || [ "$DS_INFO" = "None" ]; then
+      echo "WARNING: Could not retrieve DS record. You may need to register it manually at your domain registrar."
+    else
+      echo "DS record: ${DS_INFO}"
+
+      # Extract DS fields: KeyTag Algorithm DigestType Digest
+      KEY_TAG=$(echo "$DS_INFO" | awk '{print $1}')
+      ALGORITHM=$(echo "$DS_INFO" | awk '{print $2}')
+      DIGEST_TYPE=$(echo "$DS_INFO" | awk '{print $3}')
+      DIGEST=$(echo "$DS_INFO" | awk '{print $4}')
+
+      # Extract domain name from zone
+      DOMAIN=$(aws route53 get-hosted-zone --id "$ZONE_ID" \
+        --query 'HostedZone.Name' --output text | sed 's/\.$//')
+
+      echo "Registering DS record for domain ${DOMAIN}..."
+
+      # Check if DS record is already registered
+      EXISTING_DS=$(aws route53domains get-domain-detail --domain-name "$DOMAIN" \
+        --query 'DnssecKeys' --output text 2>/dev/null || echo "")
+
+      if [ -n "$EXISTING_DS" ] && [ "$EXISTING_DS" != "None" ] && echo "$EXISTING_DS" | grep -q "$KEY_TAG"; then
+        echo "DS record is already registered at Route53 Domains."
+      else
+        aws route53domains associate-delegation-signer-to-domain \
+          --domain-name "$DOMAIN" \
+          --signing-attributes "{\"Algorithm\": ${ALGORITHM}, \"Flags\": 257, \"PublicKey\": \"$(aws route53 get-dnssec --hosted-zone-id "$ZONE_ID" --query 'KeySigningKeys[0].PublicKey' --output text)\"}" \
+          2>/dev/null || {
+            echo "WARNING: Could not auto-register DS record. This may require manual registration."
+            echo "DS record values: KeyTag=${KEY_TAG} Algorithm=${ALGORITHM} DigestType=${DIGEST_TYPE} Digest=${DIGEST}"
+          }
+      fi
+    fi
+
+    echo "=== DNSSEC setup complete ==="
+{{- end }}

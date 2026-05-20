@@ -1,0 +1,39 @@
+{{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+{{- include "mox.requireProvider" (dict "feature" "outboundPublicIpManagement" "name" .Values.outboundPublicIpManagement.provider "expectedPlatform" "azureAso" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-reverse-dns-delete
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  clear-reverse-dns.sh: |
+    #!/bin/sh
+    set -e
+
+    PIP_NAME="{{ required "ipProvider config.publicIp.name is required" $cfg.publicIp.name }}"
+
+    echo "=== Clearing reverse DNS from ASO PublicIPAddress ${PIP_NAME} ==="
+
+    # Check if the reverseFqdn field exists before attempting removal
+    CURRENT=$(kubectl get publicipaddress "$PIP_NAME" -o jsonpath='{.spec.dnsSettings.reverseFqdn}' 2>/dev/null || echo "")
+
+    if [ -z "$CURRENT" ]; then
+      echo "No reverseFqdn set on ${PIP_NAME}. Nothing to do."
+      exit 0
+    fi
+
+    echo "Current reverseFqdn: ${CURRENT}"
+    echo "Removing reverseFqdn from ASO PublicIPAddress..."
+
+    kubectl patch publicipaddress "$PIP_NAME" --type=json \
+      -p '[{"op":"remove","path":"/spec/dnsSettings/reverseFqdn"}]'
+
+    echo "Patched ASO PublicIPAddress — reverseFqdn removed."
+    echo "ASO will reconcile the Azure-side PTR record removal."
+{{- end }}

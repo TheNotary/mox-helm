@@ -1,0 +1,36 @@
+{{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+{{- include "mox.requireProvider" (dict "feature" "outboundPublicIpManagement" "name" .Values.outboundPublicIpManagement.provider "expectedPlatform" "azureAso" "providers" .Values.providers) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mox.fullname" . }}-reverse-dns-delete
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "mox.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: reverse-dns-delete
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "mox.fullname" . }}-aso-reader
+      containers:
+        - name: clear-reverse-dns
+          image: bitnami/kubectl:latest
+          command: ["sh", "/scripts/clear-reverse-dns.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "mox.fullname" . }}-reverse-dns-delete
+            defaultMode: 0755
+{{- end }}

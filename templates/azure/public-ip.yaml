@@ -1,0 +1,30 @@
+{{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+{{- include "mox.requireProvider" (dict "feature" "outboundPublicIpManagement" "name" .Values.outboundPublicIpManagement.provider "expectedPlatform" "azureAso" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) | fromYaml }}
+apiVersion: network.azure.com/v1api20201101
+kind: PublicIPAddress
+metadata:
+  name: {{ required "ipProvider config.publicIp.name is required" $cfg.publicIp.name }}
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/resource-policy": keep
+    {{- with $cfg.publicIp.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  location: {{ required "ipProvider config.location is required" $cfg.location }}
+  owner:
+    {{- if $cfg.subscriptionId }}
+    armId: /subscriptions/{{ $cfg.subscriptionId }}/resourceGroups/{{ required "ipProvider config.resourceGroup is required" $cfg.resourceGroup }}
+    {{- else }}
+    name: {{ required "ipProvider config.resourceGroup is required" $cfg.resourceGroup }}
+    {{- end }}
+  sku:
+    name: Standard
+  publicIPAllocationMethod: Static
+  {{- if $cfg.publicIp.domainNameLabel }}
+  dnsSettings:
+    domainNameLabel: {{ $cfg.publicIp.domainNameLabel }}
+  {{- end }}
+{{- end }}

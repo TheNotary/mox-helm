@@ -1,0 +1,349 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mox.fullname" . }}
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mox.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mox.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        fsGroup: 1000
+      {{- if .Values.dnssecResolverSidecar.enabled }}
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers:
+          - "127.0.0.1"
+        searches:
+          - "{{ .Release.Namespace }}.svc.cluster.local"
+          - "svc.cluster.local"
+          - "cluster.local"
+        options:
+          - name: ndots
+            value: "5"
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+      serviceAccountName: {{ include "mox.fullname" . }}-aso-reader
+      {{- end }}
+      initContainers:
+        - name: create-mox-user
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["sh", "-c"]
+          args:
+            - |
+              if ! id mox >/dev/null 2>&1; then
+                adduser -D -h /mox -u 1000 mox
+              fi
+              cp /etc/passwd /mox-init/passwd
+              cp /etc/group /mox-init/group
+          volumeMounts:
+            - name: init-etc
+              mountPath: /mox-init
+        {{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider (not .Values.staticPublicIPs.ipv4) }}
+        {{- $ipCfg := include "mox.providerConfig" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) | fromYaml }}
+        - name: discover-ip
+          image: bitnami/kubectl:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              PIP_NAME="{{ $ipCfg.publicIp.name }}"
+              MAX_ATTEMPTS=60
+              ATTEMPT=0
+              while [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
+                ATTEMPT=$((ATTEMPT + 1))
+                if [ "${ATTEMPT}" -ge "$((MAX_ATTEMPTS - 3))" ]; then
+                  # Let stderr through on final attempts for debugging
+                  IP=$(kubectl get "publicipaddress/${PIP_NAME}" -o jsonpath='{.status.ipAddress}')
+                else
+                  IP=$(kubectl get "publicipaddress/${PIP_NAME}" -o jsonpath='{.status.ipAddress}' 2>/dev/null)
+                fi
+                # Validate it looks like an IP (basic dotted-quad check)
+                if echo "${IP}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+                  echo "Discovered public IP: ${IP} (attempt ${ATTEMPT})"
+                  echo -n "${IP}" > /mox-init/public-ip
+                  exit 0
+                fi
+                echo "Attempt ${ATTEMPT}/${MAX_ATTEMPTS}: ASO PublicIPAddress ${PIP_NAME} has no IP yet, retrying in 10s..."
+                sleep 10
+              done
+              echo "ERROR: Failed to discover public IP for ${PIP_NAME} after ${MAX_ATTEMPTS} attempts" >&2
+              exit 1
+          volumeMounts:
+            - name: init-etc
+              mountPath: /mox-init
+        {{- end }}
+        - name: init-config
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /mox/data/config
+              cp /config-source/mox.conf /mox/data/config/mox.conf
+              {{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider (not .Values.staticPublicIPs.ipv4) }}
+              if [ -f /mox-init/public-ip ]; then
+                ASO_IP=$(cat /mox-init/public-ip)
+                if [ -z "${ASO_IP}" ]; then
+                  echo "ERROR: /mox-init/public-ip exists but is empty — aborting" >&2
+                  exit 1
+                fi
+                echo "Injecting ASO public IP ${ASO_IP} into mox.conf NATIPs"
+                sed -i "s/__ASO_PUBLIC_IP__/${ASO_IP}/" /mox/data/config/mox.conf
+              fi
+              {{- end }}
+              [ -f /config-source/adminpasswd ] && cp /config-source/adminpasswd /mox/data/config/adminpasswd
+              if [ "$FORCE_RESEED" = "true" ] || [ ! -f /mox/data/config/domains.conf ]; then
+                echo "Seeding domains.conf (forceReseed=$FORCE_RESEED, exists=$([ -f /mox/data/config/domains.conf ] && echo yes || echo no))"
+                cp /config-source/domains.conf /mox/data/config/domains.conf
+              else
+                echo "Preserving existing domains.conf (use config.forceReseed=true to overwrite)"
+              fi
+              chown -R 1000:1000 /mox/data/config
+          env:
+            - name: FORCE_RESEED
+              value: {{ .Values.config.forceReseed | quote }}
+          volumeMounts:
+            - name: config-source
+              mountPath: /config-source
+              readOnly: true
+            - name: data
+              mountPath: /mox/data
+            {{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider (not .Values.staticPublicIPs.ipv4) }}
+            - name: init-etc
+              mountPath: /mox-init
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: mox
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/mox", "serve"]
+          workingDir: /mox
+          env:
+            - name: MOX_DOCKER
+              value: "yes"
+          ports:
+            {{- if .Values.listeners.smtp.enabled }}
+            - name: smtp
+              containerPort: {{ .Values.listeners.smtp.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.listeners.submissions.enabled }}
+            - name: submissions
+              containerPort: {{ .Values.listeners.submissions.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.listeners.submission.enabled }}
+            - name: submission
+              containerPort: {{ .Values.listeners.submission.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.listeners.imaps.enabled }}
+            - name: imaps
+              containerPort: {{ .Values.listeners.imaps.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.listeners.imap.enabled }}
+            - name: imap
+              containerPort: {{ .Values.listeners.imap.port }}
+              protocol: TCP
+            {{- end }}
+            - name: https
+              containerPort: 443
+              protocol: TCP
+            {{- if .Values.listeners.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.listeners.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          {{- if .Values.probes.enabled }}
+          startupProbe:
+            {{- if eq .Values.probes.type "httpGet" }}
+            httpGet:
+              path: {{ .Values.probes.httpGet.path }}
+              port: {{ .Values.probes.port }}
+              {{- if .Values.probes.httpGet.scheme }}
+              scheme: {{ .Values.probes.httpGet.scheme }}
+              {{- end }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.probes.port }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          readinessProbe:
+            {{- if eq .Values.probes.type "httpGet" }}
+            httpGet:
+              path: {{ .Values.probes.httpGet.path }}
+              port: {{ .Values.probes.port }}
+              {{- if .Values.probes.httpGet.scheme }}
+              scheme: {{ .Values.probes.httpGet.scheme }}
+              {{- end }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.probes.port }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          livenessProbe:
+            {{- if eq .Values.probes.type "httpGet" }}
+            httpGet:
+              path: {{ .Values.probes.httpGet.path }}
+              port: {{ .Values.probes.port }}
+              {{- if .Values.probes.httpGet.scheme }}
+              scheme: {{ .Values.probes.httpGet.scheme }}
+              {{- end }}
+            {{- else }}
+            tcpSocket:
+              port: {{ .Values.probes.port }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.preStopSleepSeconds }}"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /mox/config
+              subPath: config
+            - name: data
+              mountPath: /mox/data
+            {{- if and .Values.tlsManagement.enabled .Values.tlsManagement.provider }}
+            - name: tls
+              mountPath: /mox/tls
+              readOnly: true
+            {{- end }}
+            - name: dkim
+              mountPath: /mox/config/dkim
+              readOnly: true
+            - name: init-etc
+              mountPath: /etc/passwd
+              subPath: passwd
+              readOnly: true
+            - name: init-etc
+              mountPath: /etc/group
+              subPath: group
+              readOnly: true
+        {{- if .Values.dnssecResolverSidecar.enabled }}
+        - name: unbound
+          image: "{{ .Values.dnssecResolverSidecar.image.repository }}:{{ .Values.dnssecResolverSidecar.image.tag }}"
+          imagePullPolicy: {{ .Values.dnssecResolverSidecar.image.pullPolicy }}
+          ports:
+            - name: dns
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command: ["drill", "@127.0.0.1", "cloudflare.com"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["drill", "@127.0.0.1", "cloudflare.com"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.dnssecResolverSidecar.resources | nindent 12 }}
+          volumeMounts:
+            - name: unbound-config
+              mountPath: /opt/unbound/etc/unbound/unbound.conf
+              subPath: unbound.conf
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: init-etc
+          emptyDir: {}
+        - name: config-source
+          projected:
+            sources:
+              - configMap:
+                  name: {{ include "mox.fullname" . }}-config
+              - secret:
+                  name: {{ include "mox.secretName" . }}
+                  items:
+                    - key: domains.conf
+                      path: domains.conf
+                    {{- if and .Values.admin.passwordHash (not .Values.admin.existingSecret) }}
+                    - key: admin-password-hash
+                      path: adminpasswd
+                    {{- end }}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "mox.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if and .Values.tlsManagement.enabled .Values.tlsManagement.provider }}
+        - name: tls
+          secret:
+            secretName: {{ include "mox.tlsSecretName" . }}
+        {{- end }}
+        - name: dkim
+          projected:
+            sources:
+              - secret:
+                  name: {{ include "mox.secretName" . }}
+                  items:
+                    {{- range $cfg := .Values.domains }}
+                    {{- if $cfg.dkim }}
+                    {{- range $sel, $selCfg := $cfg.dkim.selectors }}
+                    {{- if $selCfg.privateKey }}
+                    - key: {{ $sel }}-{{ $cfg.name }}.privkey
+                      path: {{ $sel }}-{{ $cfg.name }}.privkey
+                    {{- end }}
+                    {{- end }}
+                    {{- end }}
+                    {{- end }}
+              {{- if include "mox.anyDomainNeedsDkimGeneration" . }}
+              - secret:
+                  name: {{ include "mox.dkimGeneratedSecretName" . }}
+                  items:
+                    {{- range $cfg := .Values.domains }}
+                    {{- $needsGen := include "mox.domainNeedsDkimGeneration" (dict "domain" $cfg "global" $) }}
+                    {{- if $needsGen }}
+                    {{- $effSel := include "mox.dkimSelectorsForDomain" (dict "domain" $cfg "global" $) | fromYaml }}
+                    {{- range $sel, $selCfg := $effSel }}
+                    - key: {{ $sel }}-{{ $cfg.name }}.privkey
+                      path: {{ $sel }}-{{ $cfg.name }}.privkey
+                    {{- end }}
+                    {{- end }}
+                    {{- end }}
+              {{- end }}
+        {{- if .Values.dnssecResolverSidecar.enabled }}
+        - name: unbound-config
+          configMap:
+            name: {{ include "mox.fullname" . }}-unbound
+        {{- end }}

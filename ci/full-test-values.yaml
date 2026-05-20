@@ -1,0 +1,75 @@
+hostname: mail.example.com
+publicIPs:
+  ipv4: "203.0.113.5"
+  ipv6: "2001:db8::1"
+logLevel: info
+admin:
+  passwordHash: "$2b$10$examplehashhere"
+domains:
+  example.com:
+    description: "Primary domain"
+    dkim:
+      selectors:
+        sel1:
+          algorithm: ed25519
+          privateKey: "dGVzdC1wcml2YXRlLWtleQ=="
+      sign:
+        - sel1
+    dmarc:
+      localpart: dmarcreports
+      account: postmaster
+      mailbox: DMARC
+    mtasts:
+      mode: enforce
+      maxAge: 86400
+    tlsrpt:
+      localpart: tlsreports
+      account: postmaster
+      mailbox: TLSRPT
+accounts:
+  postmaster:
+    domain: example.com
+    fullName: "Postmaster"
+    destinations:
+      postmaster@example.com:
+        mailbox: Inbox
+certManager:
+  enabled: true
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+dnssec:
+  enabled: true
+transport:
+  enabled: true
+  type: submissions
+  host: smtp.sendgrid.net
+  port: 465
+  auth:
+    username: apikey
+    password: SG.test-key
+    mechanisms:
+      - PLAIN
+azure:
+  serviceOperator:
+    enabled: true
+    resourceGroup: my-rg
+    location: eastus
+    publicIP:
+      name: mox-mail-ip
+      domainNameLabel: mail
+      reverseFqdn: "mail.example.com."
+service:
+  azure:
+    resourceGroup: my-rg
+    pipName: mox-mail-ip
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    labels:
+      release: prometheus
+networkPolicy:
+  enabled: true
+podDisruptionBudget:
+  enabled: true

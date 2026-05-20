@@ -1,0 +1,28 @@
+{{- if and .Values.tlsManagement.enabled .Values.tlsManagement.provider }}
+{{- include "mox.requireProvider" (dict "feature" "tlsManagement" "name" .Values.tlsManagement.provider "expectedPlatform" "certManager" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" .Values.tlsManagement.provider "providers" .Values.providers) | fromYaml }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "mox.fullname" . }}
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  {{- if (default true $cfg.keepOnUninstall) }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+spec:
+  secretName: {{ include "mox.tlsSecretName" . }}
+  {{- if (default true $cfg.keepOnUninstall) }}
+  secretTemplate:
+    annotations:
+      "helm.sh/resource-policy": keep
+  {{- end }}
+  privateKey:
+    rotationPolicy: Always
+  issuerRef:
+    name: {{ required "certProvider config.issuerRef.name is required" $cfg.issuerRef.name }}
+    kind: {{ required "certProvider config.issuerRef.kind is required" $cfg.issuerRef.kind }}
+  dnsNames:
+    {{- include "mox.certDnsNames" . | nindent 4 }}
+{{- end }}

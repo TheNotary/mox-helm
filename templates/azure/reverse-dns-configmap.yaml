@@ -1,0 +1,51 @@
+{{- if and .Values.outboundPublicIpManagement.enabled .Values.outboundPublicIpManagement.provider }}
+{{- include "mox.requireProvider" (dict "feature" "outboundPublicIpManagement" "name" .Values.outboundPublicIpManagement.provider "expectedPlatform" "azureAso" "providers" .Values.providers) }}
+{{- $cfg := include "mox.providerConfig" (dict "name" .Values.outboundPublicIpManagement.provider "providers" .Values.providers) | fromYaml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mox.fullname" . }}-reverse-dns
+  labels:
+    {{- include "mox.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  patch-reverse-dns.sh: |
+    #!/bin/sh
+    set -e
+
+    HOSTNAME="{{ .Values.hostname }}"
+    PIP_NAME="{{ required "ipProvider config.publicIp.name is required" $cfg.publicIp.name }}"
+
+    # Read IP from ASO resource
+    EXPECTED_IP=$(kubectl get publicipaddress "$PIP_NAME" -o jsonpath='{.status.ipAddress}')
+    echo "Expected IP: $EXPECTED_IP for hostname: $HOSTNAME"
+
+    # Wait for DNS A record to propagate (poll every 15s, timeout 10min)
+    ATTEMPTS=0
+    MAX_ATTEMPTS=40
+    while [ $ATTEMPTS -lt $MAX_ATTEMPTS ]; do
+      RESOLVED=$(getent ahosts "$HOSTNAME" 2>/dev/null | awk 'NR==1{print $1}' || true)
+      if [ "$RESOLVED" = "$EXPECTED_IP" ]; then
+        echo "DNS resolved: $HOSTNAME -> $RESOLVED"
+        break
+      fi
+      ATTEMPTS=$((ATTEMPTS + 1))
+      echo "Waiting for DNS propagation... (attempt $ATTEMPTS/$MAX_ATTEMPTS, got: ${RESOLVED:-none})"
+      sleep 15
+    done
+
+    if [ "$RESOLVED" != "$EXPECTED_IP" ]; then
+      echo "ERROR: DNS did not propagate within timeout"
+      exit 1
+    fi
+
+    # Patch ASO PublicIPAddress to add reverseFqdn
+    kubectl patch publicipaddress "$PIP_NAME" --type=merge -p \
+      "{\"spec\":{\"dnsSettings\":{\"reverseFqdn\":\"${HOSTNAME}.\"}}}"
+
+    echo "Patched ASO PublicIPAddress with reverseFqdn: ${HOSTNAME}."
+    echo "Azure will create the PTR record in its ARPA zone."
+{{- end }}
