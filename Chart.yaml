@@ -10,8 +10,9 @@ keywords:
   - smtp
   - imap
   - mox
-home: https://github.com/mjl-/mox
+home: https://github.com/thenotary/mox-helm
 sources:
   - https://github.com/mjl-/mox
+  - https://github.com/thenotary/mox
 maintainers:
   - name: thenotary
