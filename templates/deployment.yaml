@@ -53,6 +53,8 @@ spec:
       initContainers:
         - name: create-mox-user
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          securityContext:
+            runAsUser: 0
           command: ["sh", "-c"]
           args:
             - |
@@ -99,6 +101,8 @@ spec:
         {{- end }}
         - name: init-config
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          securityContext:
+            runAsUser: 0
           command: ["sh", "-c"]
           args:
             - |
@@ -143,41 +147,47 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/bin/mox", "serve"]
           workingDir: /mox
-          env:
-            - name: MOX_DOCKER
-              value: "yes"
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
           ports:
             {{- if .Values.listeners.smtp.enabled }}
             - name: smtp
-              containerPort: {{ .Values.listeners.smtp.port }}
+              containerPort: {{ .Values.listeners.smtp.containerPort }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.submissions.enabled }}
             - name: submissions
-              containerPort: {{ .Values.listeners.submissions.port }}
+              containerPort: {{ .Values.listeners.submissions.containerPort }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.submission.enabled }}
             - name: submission
-              containerPort: {{ .Values.listeners.submission.port }}
+              containerPort: {{ .Values.listeners.submission.containerPort }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.imaps.enabled }}
             - name: imaps
-              containerPort: {{ .Values.listeners.imaps.port }}
+              containerPort: {{ .Values.listeners.imaps.containerPort }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.imap.enabled }}
             - name: imap
-              containerPort: {{ .Values.listeners.imap.port }}
+              containerPort: {{ .Values.listeners.imap.containerPort }}
               protocol: TCP
             {{- end }}
             - name: https
-              containerPort: 443
+              containerPort: {{ .Values.listeners.https.containerPort }}
+              protocol: TCP
+            - name: http
+              containerPort: {{ .Values.listeners.http.containerPort }}
               protocol: TCP
             {{- if .Values.listeners.metrics.enabled }}
             - name: metrics
-              containerPort: {{ .Values.listeners.metrics.port }}
+              containerPort: {{ .Values.listeners.metrics.containerPort }}
               protocol: TCP
             {{- end }}
           {{- if .Values.probes.enabled }}
