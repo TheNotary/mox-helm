@@ -75,10 +75,10 @@ spec:
       protocol: TCP
     {{- end }}
     - name: http
-      port: 80
+      port: {{ .Values.listeners.http.port }}
       targetPort: http
       protocol: TCP
     - name: https
-      port: 443
+      port: {{ .Values.listeners.https.port }}
       targetPort: https
       protocol: TCP
