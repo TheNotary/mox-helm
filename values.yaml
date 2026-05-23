@@ -413,8 +413,9 @@ probes:
   # include the /healthz endpoint for a more meaningful health signal (returns
   # 503 during graceful shutdown).
   type: httpGet
-  # -- TCP port to probe. Use any always-enabled port: 80 (HTTP), 443 (HTTPS),
-  # or the metrics port (8010) if listeners.metrics.enabled is true.
+  # -- Standard port to probe. The template adds 2000 to compute the actual
+  # container port (e.g. 80 → 2080). Use any always-enabled port: 80 (HTTP),
+  # 443 (HTTPS), or the metrics port (8010) if listeners.metrics.enabled is true.
   port: 80
   # -- httpGet probe settings (used when type is httpGet)
   httpGet:

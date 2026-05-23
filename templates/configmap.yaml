@@ -90,7 +90,7 @@ data:
     {{- if .Values.listeners.metrics.enabled }}
     		MetricsHTTP:
     			Enabled: true
-    			Port: {{ add 2000 .Values.listeners.metrics.port }}
+    			Port: {{ .Values.listeners.metrics.port }}
     {{- end }}
     Postmaster:
     	Account: {{ if .Values.accounts }}{{ (first (keys .Values.accounts)) | default "postmaster" }}{{ else }}postmaster{{ end }}
