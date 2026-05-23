@@ -41,48 +41,48 @@ data:
     {{- if .Values.listeners.smtp.enabled }}
     		SMTP:
     			Enabled: true
-    			Port: {{ .Values.listeners.smtp.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.smtp.port }}
     {{- end }}
     {{- if .Values.listeners.submissions.enabled }}
     		Submissions:
     			Enabled: true
-    			Port: {{ .Values.listeners.submissions.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.submissions.port }}
     {{- end }}
     {{- if .Values.listeners.submission.enabled }}
     		Submission:
     			Enabled: true
-    			Port: {{ .Values.listeners.submission.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.submission.port }}
     {{- end }}
     {{- if .Values.listeners.imaps.enabled }}
     		IMAPS:
     			Enabled: true
-    			Port: {{ .Values.listeners.imaps.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.imaps.port }}
     {{- end }}
     {{- if .Values.listeners.imap.enabled }}
     		IMAP:
     			Enabled: true
-    			Port: {{ .Values.listeners.imap.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.imap.port }}
     {{- end }}
     {{- if .Values.listeners.webmail.enabled }}
     		WebmailHTTPS:
     			Enabled: true
-    			Port: {{ .Values.listeners.https.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.https.port }}
     {{- end }}
     {{- if .Values.listeners.webapi.enabled }}
     		WebAPIHTTPS:
     			Enabled: true
-    			Port: {{ .Values.listeners.https.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.https.port }}
     {{- end }}
     		AutoconfigHTTPS:
     			Enabled: true
-    			Port: {{ .Values.listeners.https.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.https.port }}
     		MTASTSHTTPS:
     			Enabled: true
-    			Port: {{ .Values.listeners.https.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.https.port }}
     {{- if .Values.listeners.admin.enabled }}
     		AdminHTTPS:
     			Enabled: true
-    			Port: {{ .Values.listeners.https.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.https.port }}
     {{- end }}
     	internal:
     		IPs:
@@ -90,7 +90,7 @@ data:
     {{- if .Values.listeners.metrics.enabled }}
     		MetricsHTTP:
     			Enabled: true
-    			Port: {{ .Values.listeners.metrics.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.metrics.port }}
     {{- end }}
     Postmaster:
     	Account: {{ if .Values.accounts }}{{ (first (keys .Values.accounts)) | default "postmaster" }}{{ else }}postmaster{{ end }}
@@ -122,6 +122,6 @@ data:
     	selfdelivery:
     		SMTP:
     			Host: localhost
-    			Port: {{ .Values.listeners.smtp.containerPort }}
+    			Port: {{ add 2000 .Values.listeners.smtp.port }}
     			NoSTARTTLS: true
     {{- end }}

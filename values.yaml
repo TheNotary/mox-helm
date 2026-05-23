@@ -162,38 +162,31 @@ accounts:
   #       mailbox: Inbox
 
 # -- Listener configuration for mox services.
-# Each listener has a `port` (exposed on the Kubernetes Service) and a
-# `containerPort` (what mox actually binds to inside the container).
-# Container ports are set to unprivileged values (>1024) so mox can run
-# as a non-root user. The Kubernetes Service maps standard ports to these
-# high container ports transparently.
+# Each listener has a `port` which is exposed on the Kubernetes Service.
+# Inside the container, mox binds to port + 2000 automatically (computed by
+# templates) so it can run as a non-root user without privileged ports.
+# The Kubernetes Service maps standard ports to these high container ports
+# transparently.
 listeners:
   smtp:
     enabled: true
     port: 25
-    containerPort: 1025
   submissions:
     enabled: true
     port: 465
-    containerPort: 1465
   submission:
     enabled: true
     port: 587
-    containerPort: 1587
   imaps:
     enabled: true
     port: 993
-    containerPort: 1993
   imap:
     enabled: true
     port: 143
-    containerPort: 1143
   https:
     port: 443
-    containerPort: 8443
   http:
     port: 80
-    containerPort: 8080
   webmail:
     enabled: true
   webapi:
@@ -203,7 +196,6 @@ listeners:
   metrics:
     enabled: true
     port: 8010
-    containerPort: 8010
 
 # -- Kubernetes Service configuration for the mail server.
 # Ignored when outboundPublicIpManagement is enabled (the chart hardcodes LoadBalancer +

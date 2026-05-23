@@ -156,38 +156,38 @@ spec:
           ports:
             {{- if .Values.listeners.smtp.enabled }}
             - name: smtp
-              containerPort: {{ .Values.listeners.smtp.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.smtp.port }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.submissions.enabled }}
             - name: submissions
-              containerPort: {{ .Values.listeners.submissions.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.submissions.port }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.submission.enabled }}
             - name: submission
-              containerPort: {{ .Values.listeners.submission.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.submission.port }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.imaps.enabled }}
             - name: imaps
-              containerPort: {{ .Values.listeners.imaps.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.imaps.port }}
               protocol: TCP
             {{- end }}
             {{- if .Values.listeners.imap.enabled }}
             - name: imap
-              containerPort: {{ .Values.listeners.imap.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.imap.port }}
               protocol: TCP
             {{- end }}
             - name: https
-              containerPort: {{ .Values.listeners.https.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.https.port }}
               protocol: TCP
             - name: http
-              containerPort: {{ .Values.listeners.http.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.http.port }}
               protocol: TCP
             {{- if .Values.listeners.metrics.enabled }}
             - name: metrics
-              containerPort: {{ .Values.listeners.metrics.containerPort }}
+              containerPort: {{ add 2000 .Values.listeners.metrics.port }}
               protocol: TCP
             {{- end }}
           {{- if .Values.probes.enabled }}
